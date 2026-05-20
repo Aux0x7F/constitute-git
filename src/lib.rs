@@ -1,3 +1,4 @@
+// domain-owned-vocabulary: source.policy.fastForwardRequired source.policy.reviewRequired
 use anyhow::{Result, anyhow};
 use constitute_protocol::{
     RECORD_SOURCE_IMPORT_PROOF, RECORD_SOURCE_REF_UPDATE, RECORD_SOURCE_SNAPSHOT,
