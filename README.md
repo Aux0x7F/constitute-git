@@ -10,10 +10,13 @@ refs and evidence refs.
 ## Commands
 
 ```powershell
+cargo run -- init --state target/source-graph-state.json
 cargo run -- fixture graph
+cargo run -- import snapshot --state target/source-graph-state.json --storage-object storage:object:pack-next
 cargo run -- ref update --state applied --branch main --from source:snapshot:old --to source:snapshot:new
 cargo run -- ref reduce --branch main --from source:snapshot:parent --to source:snapshot:head
-cargo run -- status
+cargo run -- ref apply --state target/source-graph-state.json --from source:snapshot:head --to source:snapshot:new
+cargo run -- status --state target/source-graph-state.json
 ```
 
 ## Boundary
@@ -24,6 +27,9 @@ cargo run -- status
   signature evidence, and witness evidence before it can become applied
   posture.
 - Storage owns encrypted object and chunk fulfillment.
+- Source snapshot imports create storage graph-edge evidence from source
+  snapshots to storage object refs; they do not move a branch until a ref update
+  is reduced and applied.
 - Build contracts and runners consume source refs; they do not become source
   truth.
 - Future Git compatibility should adapt Git pack/ref expectations to these
