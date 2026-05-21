@@ -7,10 +7,12 @@ use constitute_protocol::{
     SOURCE_OPERATION_PUSH, SOURCE_OPERATION_REF_UPDATE, SOURCE_OPERATION_STATUS,
     SOURCE_REF_KIND_BRANCH, SOURCE_UPDATE_STATE_APPLIED, SOURCE_UPDATE_STATE_BLOCKED,
     SourceGraphPolicy, SourceImportProof, SourceRefUpdate, SourceSnapshot, SourceVersionGraph,
-    SourceWriterGrant, source_ref, validate_source_import_proof, validate_source_ref_update,
-    validate_source_snapshot, validate_source_version_graph, validate_source_writer_grant,
+    SourceWriterGrant, StorageGraphEdge, sha256_hex, source_ref, validate_source_import_proof,
+    validate_source_ref_update, validate_source_snapshot, validate_source_version_graph,
+    validate_source_writer_grant,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::{fs, path::Path};
 
 const DEFAULT_NOW: u64 = 1_779_265_000_000;
 const REASON_GRAPH_NOT_READY: &str = "source.graph.notReady";
@@ -22,7 +24,7 @@ const REASON_FAST_FORWARD_REQUIRED: &str = "source.policy.fastForwardRequired";
 const REASON_REVIEW_REQUIRED: &str = "source.policy.reviewRequired";
 const REASON_SIGNED_UPDATE_REQUIRED: &str = "source.policy.signedUpdateRequired";
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceGraphFixture {
     pub graph: SourceVersionGraph,
@@ -33,7 +35,7 @@ pub struct SourceGraphFixture {
     pub import_proof: SourceImportProof,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceGraphStatus {
     pub source_graph_ref: String,
@@ -42,6 +44,51 @@ pub struct SourceGraphStatus {
     pub allowed_operations: Vec<String>,
     pub storage_backend_ref: String,
     pub state: String,
+    pub snapshot_count: usize,
+    pub ref_update_count: usize,
+    pub import_proof_count: usize,
+    pub storage_graph_edge_count: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceGraphState {
+    pub graph: SourceVersionGraph,
+    #[serde(default)]
+    pub writer_grants: Vec<SourceWriterGrant>,
+    #[serde(default)]
+    pub snapshots: Vec<SourceSnapshot>,
+    #[serde(default)]
+    pub ref_updates: Vec<SourceRefUpdate>,
+    #[serde(default)]
+    pub import_proofs: Vec<SourceImportProof>,
+    #[serde(default)]
+    pub storage_graph_edges: Vec<StorageGraphEdge>,
+    pub updated_at: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct SourceImportRequest {
+    pub commit_ref: String,
+    pub tree_ref: String,
+    pub parent_snapshot_refs: Vec<String>,
+    pub storage_object_refs: Vec<String>,
+    pub author_ref: String,
+    pub message_digest_ref: String,
+    pub signature_refs: Vec<String>,
+    pub evidence_refs: Vec<String>,
+    pub tool_ref: String,
+    pub input_ref: String,
+    pub now: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceImportOutcome {
+    pub snapshot: SourceSnapshot,
+    pub import_proof: SourceImportProof,
+    #[serde(default)]
+    pub storage_graph_edges: Vec<StorageGraphEdge>,
 }
 
 pub fn default_policy() -> SourceGraphPolicy {
@@ -187,6 +234,153 @@ pub fn build_source_graph_fixture(now: u64) -> Result<SourceGraphFixture> {
     };
     validate_source_graph_fixture(&fixture)?;
     Ok(fixture)
+}
+
+pub fn default_source_graph_state(now: u64) -> Result<SourceGraphState> {
+    let fixture = build_source_graph_fixture(now)?;
+    let mut state = SourceGraphState {
+        graph: fixture.graph,
+        writer_grants: vec![fixture.writer_grant],
+        snapshots: vec![fixture.parent_snapshot, fixture.head_snapshot],
+        ref_updates: vec![fixture.ref_update],
+        import_proofs: vec![fixture.import_proof],
+        storage_graph_edges: Vec::new(),
+        updated_at: now,
+    };
+    state.storage_graph_edges = source_storage_graph_edges(&state.graph, &state.snapshots, now)?;
+    validate_source_graph_state(&state)?;
+    Ok(state)
+}
+
+pub fn load_source_graph_state(path: impl AsRef<Path>, now: u64) -> Result<SourceGraphState> {
+    let path = path.as_ref();
+    if !path.exists() {
+        return default_source_graph_state(now);
+    }
+    let text = fs::read_to_string(path)?;
+    let state = serde_json::from_str::<SourceGraphState>(&text)?;
+    validate_source_graph_state(&state)?;
+    Ok(state)
+}
+
+pub fn save_source_graph_state(path: impl AsRef<Path>, state: &SourceGraphState) -> Result<()> {
+    validate_source_graph_state(state)?;
+    let path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    fs::write(path, serde_json::to_string_pretty(state)?)?;
+    Ok(())
+}
+
+pub fn import_snapshot(
+    state: &mut SourceGraphState,
+    request: SourceImportRequest,
+) -> Result<SourceImportOutcome> {
+    validate_source_graph_state(state)?;
+    if request.storage_object_refs.is_empty() {
+        return Err(anyhow!("source import needs storage object refs"));
+    }
+    if request.signature_refs.is_empty() {
+        return Err(anyhow!("source import needs signature refs"));
+    }
+
+    let snapshot_ref = source_ref(
+        "snapshot",
+        &short_ref_id(&format!(
+            "{}|{}|{}",
+            request.commit_ref, request.tree_ref, request.now
+        )),
+    );
+    let import_ref = source_ref(
+        "import",
+        &short_ref_id(&format!(
+            "{}|{}|{}",
+            request.input_ref, snapshot_ref, request.now
+        )),
+    );
+    let snapshot = SourceSnapshot {
+        kind: Some(RECORD_SOURCE_SNAPSHOT.to_string()),
+        source_graph_ref: state.graph.source_graph_ref.clone(),
+        snapshot_ref: snapshot_ref.clone(),
+        commit_ref: request.commit_ref,
+        tree_ref: request.tree_ref,
+        parent_snapshot_refs: request.parent_snapshot_refs,
+        storage_object_refs: request.storage_object_refs.clone(),
+        author_ref: request.author_ref,
+        message_digest_ref: request.message_digest_ref,
+        signature_refs: request.signature_refs,
+        evidence_refs: request.evidence_refs.clone(),
+        issued_at: request.now,
+    };
+    validate_source_snapshot(&snapshot)?;
+
+    let import_proof = SourceImportProof {
+        kind: Some(RECORD_SOURCE_IMPORT_PROOF.to_string()),
+        import_ref,
+        source_graph_ref: state.graph.source_graph_ref.clone(),
+        tool_ref: request.tool_ref,
+        input_ref: request.input_ref,
+        output_snapshot_ref: snapshot_ref,
+        state: SOURCE_IMPORT_STATE_IMPORTED.to_string(),
+        imported_object_refs: request.storage_object_refs,
+        evidence_refs: request.evidence_refs,
+        blocked_reasons: vec![],
+        safe_facts: serde_json::json!({
+            "snapshotRef": snapshot.snapshot_ref,
+            "storageObjectCount": snapshot.storage_object_refs.len()
+        }),
+        observed_at: request.now,
+    };
+    validate_source_import_proof(&import_proof)?;
+
+    let storage_graph_edges =
+        source_storage_graph_edges_for_snapshot(&state.graph, &snapshot, request.now)?;
+
+    state.snapshots.push(snapshot.clone());
+    state.import_proofs.push(import_proof.clone());
+    state
+        .storage_graph_edges
+        .extend(storage_graph_edges.clone());
+    state.updated_at = request.now;
+    validate_source_graph_state(state)?;
+
+    Ok(SourceImportOutcome {
+        snapshot,
+        import_proof,
+        storage_graph_edges,
+    })
+}
+
+pub fn apply_ref_update(
+    state: &mut SourceGraphState,
+    request: SourceRefUpdateRequest,
+) -> Result<SourceRefUpdate> {
+    validate_source_graph_state(state)?;
+    let update = reduce_ref_update(
+        &state.graph,
+        &state.writer_grants,
+        &state.snapshots,
+        request,
+    )?;
+    if update.state == SOURCE_UPDATE_STATE_APPLIED {
+        state.graph.head_snapshot_ref = update.to_snapshot_ref.clone();
+        if !state
+            .graph
+            .evidence_refs
+            .iter()
+            .any(|value| value == &update.update_ref)
+        {
+            state.graph.evidence_refs.push(update.update_ref.clone());
+        }
+        state.graph.issued_at = update.signed_at;
+        state.updated_at = update.signed_at;
+    }
+    state.ref_updates.push(update.clone());
+    validate_source_graph_state(state)?;
+    Ok(update)
 }
 
 #[derive(Clone, Debug)]
@@ -379,14 +573,22 @@ fn usable_source_writer_grant_refs(
 }
 
 pub fn build_status() -> Result<SourceGraphStatus> {
-    let fixture = build_source_graph_fixture(DEFAULT_NOW)?;
+    source_graph_status(&default_source_graph_state(DEFAULT_NOW)?)
+}
+
+pub fn source_graph_status(state: &SourceGraphState) -> Result<SourceGraphStatus> {
+    validate_source_graph_state(state)?;
     Ok(SourceGraphStatus {
-        source_graph_ref: fixture.graph.source_graph_ref,
-        head_snapshot_ref: fixture.graph.head_snapshot_ref,
-        default_branch_ref: fixture.graph.default_branch_ref,
-        allowed_operations: fixture.graph.policy.allowed_operations,
-        storage_backend_ref: fixture.graph.storage_backend_ref,
-        state: fixture.graph.state,
+        source_graph_ref: state.graph.source_graph_ref.clone(),
+        head_snapshot_ref: state.graph.head_snapshot_ref.clone(),
+        default_branch_ref: state.graph.default_branch_ref.clone(),
+        allowed_operations: state.graph.policy.allowed_operations.clone(),
+        storage_backend_ref: state.graph.storage_backend_ref.clone(),
+        state: state.graph.state.clone(),
+        snapshot_count: state.snapshots.len(),
+        ref_update_count: state.ref_updates.len(),
+        import_proof_count: state.import_proofs.len(),
+        storage_graph_edge_count: state.storage_graph_edges.len(),
     })
 }
 
@@ -404,6 +606,137 @@ pub fn validate_source_graph_fixture(fixture: &SourceGraphFixture) -> Result<()>
         return Err(anyhow!("graph headSnapshotRef must match head snapshot"));
     }
     Ok(())
+}
+
+pub fn validate_source_graph_state(state: &SourceGraphState) -> Result<()> {
+    validate_source_version_graph(&state.graph)?;
+    for grant in &state.writer_grants {
+        validate_source_writer_grant(grant)?;
+    }
+    for snapshot in &state.snapshots {
+        validate_source_snapshot(snapshot)?;
+        if snapshot.source_graph_ref != state.graph.source_graph_ref {
+            return Err(anyhow!("source state snapshot sourceGraphRef diverges"));
+        }
+    }
+    for update in &state.ref_updates {
+        validate_source_ref_update(update)?;
+        if update.source_graph_ref != state.graph.source_graph_ref {
+            return Err(anyhow!("source state update sourceGraphRef diverges"));
+        }
+    }
+    for proof in &state.import_proofs {
+        validate_source_import_proof(proof)?;
+        if proof.source_graph_ref != state.graph.source_graph_ref {
+            return Err(anyhow!("source state import sourceGraphRef diverges"));
+        }
+    }
+    if !snapshot_known(
+        &state.snapshots,
+        &state.graph.source_graph_ref,
+        &state.graph.head_snapshot_ref,
+    ) {
+        return Err(anyhow!(
+            "source graph head snapshot is not present in state"
+        ));
+    }
+    for edge in &state.storage_graph_edges {
+        validate_storage_graph_edge(edge)?;
+    }
+    if state.updated_at == 0 {
+        return Err(anyhow!("source graph state missing updatedAt"));
+    }
+    Ok(())
+}
+
+pub fn source_storage_graph_edges(
+    graph: &SourceVersionGraph,
+    snapshots: &[SourceSnapshot],
+    now: u64,
+) -> Result<Vec<StorageGraphEdge>> {
+    let mut edges = Vec::new();
+    for snapshot in snapshots {
+        if snapshot.source_graph_ref != graph.source_graph_ref {
+            continue;
+        }
+        edges.extend(source_storage_graph_edges_for_snapshot(
+            graph, snapshot, now,
+        )?);
+    }
+    Ok(edges)
+}
+
+fn source_storage_graph_edges_for_snapshot(
+    graph: &SourceVersionGraph,
+    snapshot: &SourceSnapshot,
+    now: u64,
+) -> Result<Vec<StorageGraphEdge>> {
+    validate_source_version_graph(graph)?;
+    validate_source_snapshot(snapshot)?;
+    let mut edges = Vec::new();
+    for storage_ref in &snapshot.storage_object_refs {
+        let edge = StorageGraphEdge {
+            edge_id: format!(
+                "storage:graph-edge:{}",
+                short_ref_id(&format!(
+                    "{}|{}|{}",
+                    snapshot.snapshot_ref, storage_ref, now
+                ))
+            ),
+            container_id: graph.storage_backend_ref.clone(),
+            from_ref: snapshot.snapshot_ref.clone(),
+            relation: "sourceSnapshot.stores".to_string(),
+            to_ref: storage_ref.clone(),
+            detail_ref: None,
+            created_at: now,
+        };
+        validate_storage_graph_edge(&edge)?;
+        edges.push(edge);
+    }
+    Ok(edges)
+}
+
+fn validate_storage_graph_edge(edge: &StorageGraphEdge) -> Result<()> {
+    if edge.edge_id.trim().is_empty() {
+        return Err(anyhow!("storage graph edge missing edgeId"));
+    }
+    if edge.container_id.trim().is_empty() {
+        return Err(anyhow!("storage graph edge missing containerId"));
+    }
+    if edge.from_ref.trim().is_empty() {
+        return Err(anyhow!("storage graph edge missing fromRef"));
+    }
+    if edge.relation.trim().is_empty() {
+        return Err(anyhow!("storage graph edge missing relation"));
+    }
+    if edge.to_ref.trim().is_empty() {
+        return Err(anyhow!("storage graph edge missing toRef"));
+    }
+    if edge.created_at == 0 {
+        return Err(anyhow!("storage graph edge missing createdAt"));
+    }
+    if [
+        &edge.edge_id,
+        &edge.container_id,
+        &edge.from_ref,
+        &edge.to_ref,
+    ]
+    .iter()
+    .any(|value| {
+        value.chars().any(char::is_whitespace)
+            || value.contains('\\')
+            || value.starts_with('/')
+            || value.starts_with("file:")
+            || value.starts_with("http:")
+            || value.starts_with("https:")
+    }) {
+        return Err(anyhow!("storage graph edge refs must be virtual refs"));
+    }
+    Ok(())
+}
+
+fn short_ref_id(value: &str) -> String {
+    sha256_hex(value).chars().take(16).collect()
 }
 
 pub fn default_now() -> u64 {
