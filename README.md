@@ -12,6 +12,7 @@ refs and evidence refs.
 ```powershell
 cargo run -- fixture graph
 cargo run -- ref update --state applied --branch main --from source:snapshot:old --to source:snapshot:new
+cargo run -- ref reduce --branch main --from source:snapshot:parent --to source:snapshot:head
 cargo run -- status
 ```
 
@@ -19,6 +20,9 @@ cargo run -- status
 
 - Source graph owns source refs, snapshots, branch/tag refs, writer grants, and
   source import proof.
+- Ref movement reduces against graph policy, writer grants, known snapshots,
+  signature evidence, and witness evidence before it can become applied
+  posture.
 - Storage owns encrypted object and chunk fulfillment.
 - Build contracts and runners consume source refs; they do not become source
   truth.
