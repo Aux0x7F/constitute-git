@@ -1,17 +1,26 @@
+// domain-owned-vocabulary: source.graph.notReady source.graph.expired source.ref.unknown source.snapshot.unknown source.grant.unusable source.policy.fastForwardRequired source.policy.reviewRequired source.policy.signedUpdateRequired
 use anyhow::{Result, anyhow};
 use constitute_protocol::{
     RECORD_SOURCE_IMPORT_PROOF, RECORD_SOURCE_REF_UPDATE, RECORD_SOURCE_SNAPSHOT,
     RECORD_SOURCE_VERSION_GRAPH, RECORD_SOURCE_WRITER_GRANT, SOURCE_GRAPH_STATE_READY,
     SOURCE_IMPORT_STATE_IMPORTED, SOURCE_OPERATION_FETCH, SOURCE_OPERATION_IMPORT,
     SOURCE_OPERATION_PUSH, SOURCE_OPERATION_REF_UPDATE, SOURCE_OPERATION_STATUS,
-    SOURCE_REF_KIND_BRANCH, SOURCE_UPDATE_STATE_APPLIED, SourceGraphPolicy, SourceImportProof,
-    SourceRefUpdate, SourceSnapshot, SourceVersionGraph, SourceWriterGrant, source_ref,
-    validate_source_import_proof, validate_source_ref_update, validate_source_snapshot,
-    validate_source_version_graph, validate_source_writer_grant,
+    SOURCE_REF_KIND_BRANCH, SOURCE_UPDATE_STATE_APPLIED, SOURCE_UPDATE_STATE_BLOCKED,
+    SourceGraphPolicy, SourceImportProof, SourceRefUpdate, SourceSnapshot, SourceVersionGraph,
+    SourceWriterGrant, source_ref, validate_source_import_proof, validate_source_ref_update,
+    validate_source_snapshot, validate_source_version_graph, validate_source_writer_grant,
 };
 use serde::Serialize;
 
 const DEFAULT_NOW: u64 = 1_779_265_000_000;
+const REASON_GRAPH_NOT_READY: &str = "source.graph.notReady";
+const REASON_GRAPH_EXPIRED: &str = "source.graph.expired";
+const REASON_REF_UNKNOWN: &str = "source.ref.unknown";
+const REASON_SNAPSHOT_UNKNOWN: &str = "source.snapshot.unknown";
+const REASON_GRANT_UNUSABLE: &str = "source.grant.unusable";
+const REASON_FAST_FORWARD_REQUIRED: &str = "source.policy.fastForwardRequired";
+const REASON_REVIEW_REQUIRED: &str = "source.policy.reviewRequired";
+const REASON_SIGNED_UPDATE_REQUIRED: &str = "source.policy.signedUpdateRequired";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -95,14 +104,38 @@ pub fn build_source_graph_fixture(now: u64) -> Result<SourceGraphFixture> {
         expires_at: Some(now + 86_400_000),
         revoked_at: None,
     };
-    let ref_update = build_ref_update(SourceRefUpdateOptions {
-        state: SOURCE_UPDATE_STATE_APPLIED.to_string(),
-        branch: "main".to_string(),
-        from_snapshot_ref: Some(parent_snapshot.snapshot_ref.clone()),
-        to_snapshot_ref: head_snapshot.snapshot_ref.clone(),
-        writer_ref: writer_grant.subject_ref.clone(),
-        now,
-    });
+    let base_graph = SourceVersionGraph {
+        kind: Some(RECORD_SOURCE_VERSION_GRAPH.to_string()),
+        source_graph_ref: parent_snapshot.source_graph_ref.clone(),
+        owner_ref: "identity:root:aux".to_string(),
+        storage_backend_ref: "storage:backend:local".to_string(),
+        default_branch_ref: source_ref("ref", "main"),
+        head_snapshot_ref: parent_snapshot.snapshot_ref.clone(),
+        state: SOURCE_GRAPH_STATE_READY.to_string(),
+        policy: default_policy(),
+        branch_refs: vec![source_ref("ref", "main")],
+        tag_refs: vec![],
+        writer_grant_refs: vec![writer_grant.grant_ref.clone()],
+        release_refs: vec![],
+        evidence_refs: vec![],
+        blocked_reasons: vec![],
+        issued_at: now.saturating_sub(30),
+        expires_at: Some(now + 86_400_000),
+    };
+    let ref_update = reduce_ref_update(
+        &base_graph,
+        std::slice::from_ref(&writer_grant),
+        &[parent_snapshot.clone(), head_snapshot.clone()],
+        SourceRefUpdateRequest {
+            branch: "main".to_string(),
+            from_snapshot_ref: Some(parent_snapshot.snapshot_ref.clone()),
+            to_snapshot_ref: head_snapshot.snapshot_ref.clone(),
+            writer_ref: writer_grant.subject_ref.clone(),
+            evidence_refs: vec!["source:evidence:signed-update".to_string()],
+            witness_refs: vec!["source:witness:runtime".to_string()],
+            now,
+        },
+    )?;
     let import_proof = SourceImportProof {
         kind: Some(RECORD_SOURCE_IMPORT_PROOF.to_string()),
         import_ref: source_ref("import", "initial-pack"),
@@ -136,7 +169,10 @@ pub fn build_source_graph_fixture(now: u64) -> Result<SourceGraphFixture> {
         tag_refs: vec![],
         writer_grant_refs: vec![writer_grant.grant_ref.clone()],
         release_refs: vec![],
-        evidence_refs: vec![import_proof.import_ref.clone()],
+        evidence_refs: vec![
+            import_proof.import_ref.clone(),
+            ref_update.update_ref.clone(),
+        ],
         blocked_reasons: vec![],
         issued_at: now,
         expires_at: Some(now + 86_400_000),
@@ -163,10 +199,21 @@ pub struct SourceRefUpdateOptions {
     pub now: u64,
 }
 
+#[derive(Clone, Debug)]
+pub struct SourceRefUpdateRequest {
+    pub branch: String,
+    pub from_snapshot_ref: Option<String>,
+    pub to_snapshot_ref: String,
+    pub writer_ref: String,
+    pub evidence_refs: Vec<String>,
+    pub witness_refs: Vec<String>,
+    pub now: u64,
+}
+
 pub fn build_ref_update(options: SourceRefUpdateOptions) -> SourceRefUpdate {
     let blocked_reasons = match options.state.as_str() {
-        "blocked" => vec!["source.policy.fastForwardRequired".to_string()],
-        "rejected" => vec!["source.policy.reviewRequired".to_string()],
+        "blocked" => vec![REASON_FAST_FORWARD_REQUIRED.to_string()],
+        "rejected" => vec![REASON_REVIEW_REQUIRED.to_string()],
         _ => vec![],
     };
     SourceRefUpdate {
@@ -187,6 +234,148 @@ pub fn build_ref_update(options: SourceRefUpdateOptions) -> SourceRefUpdate {
         signed_at: options.now,
         valid_until: Some(options.now + 3_600_000),
     }
+}
+
+pub fn reduce_fixture_ref_update(request: SourceRefUpdateRequest) -> Result<SourceRefUpdate> {
+    let fixture = build_source_graph_fixture(request.now)?;
+    let mut base_graph = fixture.graph.clone();
+    base_graph.head_snapshot_ref = fixture.parent_snapshot.snapshot_ref.clone();
+    reduce_ref_update(
+        &base_graph,
+        &[fixture.writer_grant],
+        &[fixture.parent_snapshot, fixture.head_snapshot],
+        request,
+    )
+}
+
+pub fn reduce_ref_update(
+    graph: &SourceVersionGraph,
+    grants: &[SourceWriterGrant],
+    snapshots: &[SourceSnapshot],
+    request: SourceRefUpdateRequest,
+) -> Result<SourceRefUpdate> {
+    validate_source_version_graph(graph)?;
+    for grant in grants {
+        validate_source_writer_grant(grant)?;
+    }
+    for snapshot in snapshots {
+        validate_source_snapshot(snapshot)?;
+    }
+
+    let branch_ref = source_ref("ref", &request.branch);
+    let mut blocked_reasons = Vec::new();
+    if graph.state != SOURCE_GRAPH_STATE_READY {
+        blocked_reasons.push(REASON_GRAPH_NOT_READY.to_string());
+    }
+    if graph
+        .expires_at
+        .is_some_and(|expires_at| expires_at <= request.now)
+    {
+        blocked_reasons.push(REASON_GRAPH_EXPIRED.to_string());
+    }
+    if !graph.branch_refs.iter().any(|value| value == &branch_ref) {
+        blocked_reasons.push(REASON_REF_UNKNOWN.to_string());
+    }
+    if graph.policy.fast_forward_only {
+        match request.from_snapshot_ref.as_deref() {
+            Some(from_snapshot_ref) if from_snapshot_ref == graph.head_snapshot_ref => {}
+            _ => blocked_reasons.push(REASON_FAST_FORWARD_REQUIRED.to_string()),
+        }
+    }
+    if graph.policy.signed_updates_required && request.evidence_refs.is_empty() {
+        blocked_reasons.push(REASON_SIGNED_UPDATE_REQUIRED.to_string());
+    }
+    if graph.policy.review_required && request.witness_refs.is_empty() {
+        blocked_reasons.push(REASON_REVIEW_REQUIRED.to_string());
+    }
+    if !snapshot_known(snapshots, &graph.source_graph_ref, &request.to_snapshot_ref) {
+        blocked_reasons.push(REASON_SNAPSHOT_UNKNOWN.to_string());
+    }
+    if let Some(from_snapshot_ref) = request.from_snapshot_ref.as_deref() {
+        if !snapshot_known(snapshots, &graph.source_graph_ref, from_snapshot_ref) {
+            blocked_reasons.push(REASON_SNAPSHOT_UNKNOWN.to_string());
+        }
+    }
+
+    let usable_grant_refs = usable_source_writer_grant_refs(graph, grants, &request, &branch_ref);
+    if usable_grant_refs.is_empty() {
+        blocked_reasons.push(REASON_GRANT_UNUSABLE.to_string());
+    }
+    blocked_reasons.sort();
+    blocked_reasons.dedup();
+
+    let update = SourceRefUpdate {
+        kind: Some(RECORD_SOURCE_REF_UPDATE.to_string()),
+        update_ref: source_ref("update", &format!("{}-{}", request.branch, request.now)),
+        source_graph_ref: graph.source_graph_ref.clone(),
+        ref_name: format!("refs/heads/{}", request.branch),
+        ref_kind: SOURCE_REF_KIND_BRANCH.to_string(),
+        from_snapshot_ref: request.from_snapshot_ref,
+        to_snapshot_ref: request.to_snapshot_ref,
+        writer_ref: request.writer_ref,
+        state: if blocked_reasons.is_empty() {
+            SOURCE_UPDATE_STATE_APPLIED.to_string()
+        } else {
+            SOURCE_UPDATE_STATE_BLOCKED.to_string()
+        },
+        grant_refs: usable_grant_refs,
+        evidence_refs: request.evidence_refs,
+        witness_refs: request.witness_refs,
+        blocked_reasons,
+        policy: graph.policy.clone(),
+        signed_at: request.now,
+        valid_until: Some(request.now + 3_600_000),
+    };
+    validate_source_ref_update(&update)?;
+    Ok(update)
+}
+
+fn snapshot_known(
+    snapshots: &[SourceSnapshot],
+    source_graph_ref: &str,
+    snapshot_ref: &str,
+) -> bool {
+    snapshots.iter().any(|snapshot| {
+        snapshot.source_graph_ref == source_graph_ref && snapshot.snapshot_ref == snapshot_ref
+    })
+}
+
+fn usable_source_writer_grant_refs(
+    graph: &SourceVersionGraph,
+    grants: &[SourceWriterGrant],
+    request: &SourceRefUpdateRequest,
+    branch_ref: &str,
+) -> Vec<String> {
+    grants
+        .iter()
+        .filter(|grant| grant.source_graph_ref == graph.source_graph_ref)
+        .filter(|grant| grant.subject_ref == request.writer_ref)
+        .filter(|grant| {
+            graph
+                .writer_grant_refs
+                .iter()
+                .any(|value| value == &grant.grant_ref)
+        })
+        .filter(|grant| {
+            grant
+                .allowed_operations
+                .iter()
+                .any(|value| value == SOURCE_OPERATION_PUSH || value == SOURCE_OPERATION_REF_UPDATE)
+        })
+        .filter(|grant| grant.scope_refs.iter().any(|value| value == branch_ref))
+        .filter(|grant| grant.issued_at <= request.now)
+        .filter(|grant| {
+            grant
+                .expires_at
+                .is_none_or(|expires_at| expires_at > request.now)
+        })
+        .filter(|grant| {
+            grant
+                .revoked_at
+                .is_none_or(|revoked_at| revoked_at > request.now)
+        })
+        .map(|grant| grant.grant_ref.clone())
+        .collect()
 }
 
 pub fn build_status() -> Result<SourceGraphStatus> {

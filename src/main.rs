@@ -1,6 +1,7 @@
 use anyhow::{Result, anyhow};
 use constitute_git::{
-    SourceRefUpdateOptions, build_ref_update, build_source_graph_fixture, build_status, default_now,
+    SourceRefUpdateOptions, SourceRefUpdateRequest, build_ref_update, build_source_graph_fixture,
+    build_status, default_now, reduce_fixture_ref_update,
 };
 use constitute_protocol::validate_source_ref_update;
 use std::env;
@@ -35,6 +36,11 @@ fn ref_command(mut args: Vec<String>) -> Result<()> {
             let update = build_ref_update(options);
             validate_source_ref_update(&update)?;
             print_json(&update)
+        }
+        Some("reduce") => {
+            args.remove(0);
+            let request = parse_ref_update_request(args)?;
+            print_json(&reduce_fixture_ref_update(request)?)
         }
         Some(name) => Err(anyhow!("unsupported ref command: {name}")),
         None => Err(anyhow!("ref command requires a subcommand")),
@@ -81,6 +87,59 @@ fn parse_ref_update_options(args: Vec<String>) -> Result<SourceRefUpdateOptions>
     })
 }
 
+fn parse_ref_update_request(args: Vec<String>) -> Result<SourceRefUpdateRequest> {
+    let mut branch = "main".to_string();
+    let mut from_snapshot_ref = Some("source:snapshot:parent".to_string());
+    let mut to_snapshot_ref = "source:snapshot:head".to_string();
+    let mut writer_ref = "identity:device:agent".to_string();
+    let mut evidence_refs = vec!["source:evidence:signed-update".to_string()];
+    let mut witness_refs = vec!["source:witness:runtime".to_string()];
+    let mut now = default_now();
+
+    let mut iter = args.into_iter();
+    while let Some(flag) = iter.next() {
+        let value = iter
+            .next()
+            .ok_or_else(|| anyhow!("{flag} requires a value"))?;
+        match flag.as_str() {
+            "--branch" => branch = value,
+            "--from" => from_snapshot_ref = Some(value),
+            "--no-from" => {
+                if value != "true" {
+                    return Err(anyhow!("--no-from expects true"));
+                }
+                from_snapshot_ref = None;
+            }
+            "--to" => to_snapshot_ref = value,
+            "--writer" => writer_ref = value,
+            "--no-evidence" => {
+                if value != "true" {
+                    return Err(anyhow!("--no-evidence expects true"));
+                }
+                evidence_refs.clear();
+            }
+            "--no-witness" => {
+                if value != "true" {
+                    return Err(anyhow!("--no-witness expects true"));
+                }
+                witness_refs.clear();
+            }
+            "--now" => now = value.parse::<u64>()?,
+            _ => return Err(anyhow!("unsupported ref reduce flag: {flag}")),
+        }
+    }
+
+    Ok(SourceRefUpdateRequest {
+        branch,
+        from_snapshot_ref,
+        to_snapshot_ref,
+        writer_ref,
+        evidence_refs,
+        witness_refs,
+        now,
+    })
+}
+
 fn print_json(value: &impl serde::Serialize) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
@@ -88,6 +147,6 @@ fn print_json(value: &impl serde::Serialize) -> Result<()> {
 
 fn print_help() {
     println!(
-        "constitute-git\n\nCommands:\n  fixture graph\n  ref update [--state applied|blocked|rejected] [--branch main] [--from source:snapshot:old] [--to source:snapshot:new]\n  status"
+        "constitute-git\n\nCommands:\n  fixture graph\n  ref update [--state applied|blocked|rejected] [--branch main] [--from source:snapshot:old] [--to source:snapshot:new]\n  ref reduce [--branch main] [--from source:snapshot:parent] [--to source:snapshot:head] [--writer identity:device:agent]\n  status"
     );
 }
