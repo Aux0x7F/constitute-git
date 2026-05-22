@@ -7,8 +7,8 @@ use constitute_protocol::{
     RECORD_SOURCE_IMPORT_PROOF, RECORD_SOURCE_PROJECT_OPERATION, RECORD_SOURCE_REF_UPDATE,
     RECORD_SOURCE_SNAPSHOT, RECORD_SOURCE_VERSION_GRAPH, RECORD_SOURCE_WRITER_GRANT,
     SOURCE_GRAPH_STATE_READY, SOURCE_IMPORT_STATE_IMPORTED, SOURCE_OPERATION_FETCH,
-    SOURCE_OPERATION_IMPORT, SOURCE_OPERATION_PUSH, SOURCE_OPERATION_REF_UPDATE,
-    SOURCE_OPERATION_STATUS, SOURCE_PROJECT_COMPATIBILITY_SUPPORTED,
+    SOURCE_OPERATION_IMPORT, SOURCE_OPERATION_PROJECT_LINK, SOURCE_OPERATION_PUSH,
+    SOURCE_OPERATION_REF_UPDATE, SOURCE_OPERATION_STATUS, SOURCE_PROJECT_COMPATIBILITY_SUPPORTED,
     SOURCE_PROJECT_OPERATION_STATE_APPLIED, SOURCE_PROJECT_OPERATION_STATE_BLOCKED,
     SOURCE_PROJECT_OPERATION_STATE_REJECTED, SOURCE_PROJECT_OPERATION_STATE_REQUESTED,
     SOURCE_PROJECT_OPERATION_STATE_SUPERSEDED, SOURCE_REF_KIND_BRANCH, SOURCE_UPDATE_STATE_APPLIED,
@@ -102,6 +102,16 @@ pub struct SourceImportRequest {
     pub now: u64,
 }
 
+#[derive(Clone, Debug)]
+pub struct SourceProjectLinkRequest {
+    pub project_refs: Vec<String>,
+    pub work_item_refs: Vec<String>,
+    pub actor_ref: String,
+    pub evidence_refs: Vec<String>,
+    pub now: u64,
+    pub expires_at: Option<u64>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceImportOutcome {
@@ -110,6 +120,13 @@ pub struct SourceImportOutcome {
     pub source_project_operation: SourceProjectOperation,
     #[serde(default)]
     pub storage_graph_edges: Vec<StorageGraphEdge>,
+    pub host_fabric_contribution: HostFabricMemberContribution,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceProjectLinkOutcome {
+    pub source_project_operation: SourceProjectOperation,
     pub host_fabric_contribution: HostFabricMemberContribution,
 }
 
@@ -441,6 +458,78 @@ pub fn apply_ref_update(
         .push(source_project_operation);
     validate_source_graph_state(state)?;
     Ok(update)
+}
+
+pub fn link_project_work(
+    state: &mut SourceGraphState,
+    request: SourceProjectLinkRequest,
+) -> Result<SourceProjectLinkOutcome> {
+    validate_source_graph_state(state)?;
+    if request.project_refs.is_empty() && request.work_item_refs.is_empty() {
+        return Err(anyhow!(
+            "project link requires project refs or work item refs"
+        ));
+    }
+    if request.actor_ref.trim().is_empty() {
+        return Err(anyhow!("project link requires actorRef"));
+    }
+    if request.evidence_refs.is_empty() {
+        return Err(anyhow!("project link requires evidenceRefs"));
+    }
+    let operation_ref = source_ref(
+        "operation",
+        &short_ref_id(&format!(
+            "{}|{}|{}",
+            request.project_refs.join(","),
+            request.work_item_refs.join(","),
+            request.now
+        )),
+    );
+    let operation = SourceProjectOperation {
+        kind: Some(RECORD_SOURCE_PROJECT_OPERATION.to_string()),
+        operation_ref,
+        source_graph_ref: state.graph.source_graph_ref.clone(),
+        subject_ref: state.graph.source_graph_ref.clone(),
+        actor_ref: request.actor_ref,
+        operation: SOURCE_OPERATION_PROJECT_LINK.to_string(),
+        state: SOURCE_PROJECT_OPERATION_STATE_APPLIED.to_string(),
+        compatibility_state: SOURCE_PROJECT_COMPATIBILITY_SUPPORTED.to_string(),
+        scope_refs: state.graph.branch_refs.clone(),
+        source_snapshot_refs: vec![state.graph.head_snapshot_ref.clone()],
+        content_index_refs: vec![content_index_ref_for_graph(&state.graph)],
+        storage_refs: Vec::new(),
+        branch_refs: state.graph.branch_refs.clone(),
+        tag_refs: state.graph.tag_refs.clone(),
+        release_refs: state.graph.release_refs.clone(),
+        project_refs: request.project_refs,
+        work_item_refs: request.work_item_refs,
+        build_target_refs: Vec::new(),
+        build_profile_refs: Vec::new(),
+        build_proof_refs: Vec::new(),
+        compatibility_refs: vec!["compat:project:workflow-adapter-v1".to_string()],
+        proof_refs: Vec::new(),
+        evidence_refs: request.evidence_refs,
+        rollback_refs: Vec::new(),
+        blocked_reasons: Vec::new(),
+        safe_facts: serde_json::json!({
+            "operation": "projectLink",
+            "state": "applied"
+        }),
+        issued_at: request.now,
+        expires_at: request.expires_at,
+    };
+    validate_source_project_operation(&operation)?;
+    state.source_project_operations.push(operation.clone());
+    let host_fabric_contribution = source_content_index_contribution_for_state(state, request.now)?;
+    state
+        .host_fabric_contributions
+        .push(host_fabric_contribution.clone());
+    state.updated_at = request.now;
+    validate_source_graph_state(state)?;
+    Ok(SourceProjectLinkOutcome {
+        source_project_operation: operation,
+        host_fabric_contribution,
+    })
 }
 
 fn source_project_operation_for_import(
