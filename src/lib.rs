@@ -1,13 +1,17 @@
 // domain-owned-vocabulary: source.graph.notReady source.graph.expired source.ref.unknown source.snapshot.unknown source.grant.unusable source.policy.fastForwardRequired source.policy.reviewRequired source.policy.signedUpdateRequired
 use anyhow::{Result, anyhow};
+use constitute_fabric::{HostFabricMemberContributionSpec, build_host_fabric_member_contribution};
 use constitute_protocol::{
+    FABRIC_MEMBER_CONTRIBUTION_BLOCKED, FABRIC_MEMBER_CONTRIBUTION_RUNNING,
+    FABRIC_MEMBER_ROLE_SOURCE_CONTENT_INDEX, HostFabricMemberContribution,
     RECORD_SOURCE_IMPORT_PROOF, RECORD_SOURCE_REF_UPDATE, RECORD_SOURCE_SNAPSHOT,
     RECORD_SOURCE_VERSION_GRAPH, RECORD_SOURCE_WRITER_GRANT, SOURCE_GRAPH_STATE_READY,
     SOURCE_IMPORT_STATE_IMPORTED, SOURCE_OPERATION_FETCH, SOURCE_OPERATION_IMPORT,
     SOURCE_OPERATION_PUSH, SOURCE_OPERATION_REF_UPDATE, SOURCE_OPERATION_STATUS,
     SOURCE_REF_KIND_BRANCH, SOURCE_UPDATE_STATE_APPLIED, SOURCE_UPDATE_STATE_BLOCKED,
     SourceGraphPolicy, SourceImportProof, SourceRefUpdate, SourceSnapshot, SourceVersionGraph,
-    SourceWriterGrant, StorageGraphEdge, sha256_hex, source_ref, validate_source_import_proof,
+    SourceWriterGrant, StorageGraphEdge, sha256_hex, source_ref,
+    validate_host_fabric_member_contribution, validate_source_import_proof,
     validate_source_ref_update, validate_source_snapshot, validate_source_version_graph,
     validate_source_writer_grant,
 };
@@ -23,6 +27,10 @@ const REASON_GRANT_UNUSABLE: &str = "source.grant.unusable";
 const REASON_FAST_FORWARD_REQUIRED: &str = "source.policy.fastForwardRequired";
 const REASON_REVIEW_REQUIRED: &str = "source.policy.reviewRequired";
 const REASON_SIGNED_UPDATE_REQUIRED: &str = "source.policy.signedUpdateRequired";
+const DEFAULT_FABRIC_REF: &str = "fabric:source-lab";
+const DEFAULT_HOST_REF: &str = "host:runner-lab";
+const DEFAULT_SOURCE_MEMBER_REF: &str =
+    "b8a4523a801d84e030f81645097b84f4ba78bd8e4986b62b82ad1e215bbf6312";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,6 +41,7 @@ pub struct SourceGraphFixture {
     pub head_snapshot: SourceSnapshot,
     pub ref_update: SourceRefUpdate,
     pub import_proof: SourceImportProof,
+    pub host_fabric_contribution: HostFabricMemberContribution,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -48,6 +57,7 @@ pub struct SourceGraphStatus {
     pub ref_update_count: usize,
     pub import_proof_count: usize,
     pub storage_graph_edge_count: usize,
+    pub host_fabric_contribution_count: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -64,6 +74,8 @@ pub struct SourceGraphState {
     pub import_proofs: Vec<SourceImportProof>,
     #[serde(default)]
     pub storage_graph_edges: Vec<StorageGraphEdge>,
+    #[serde(default)]
+    pub host_fabric_contributions: Vec<HostFabricMemberContribution>,
     pub updated_at: u64,
 }
 
@@ -89,6 +101,7 @@ pub struct SourceImportOutcome {
     pub import_proof: SourceImportProof,
     #[serde(default)]
     pub storage_graph_edges: Vec<StorageGraphEdge>,
+    pub host_fabric_contribution: HostFabricMemberContribution,
 }
 
 pub fn default_policy() -> SourceGraphPolicy {
@@ -224,6 +237,19 @@ pub fn build_source_graph_fixture(now: u64) -> Result<SourceGraphFixture> {
         issued_at: now,
         expires_at: Some(now + 86_400_000),
     };
+    let fixture_storage_edges = source_storage_graph_edges(
+        &graph,
+        &[parent_snapshot.clone(), head_snapshot.clone()],
+        now,
+    )?;
+    let host_fabric_contribution = source_content_index_contribution(
+        &graph,
+        &[parent_snapshot.clone(), head_snapshot.clone()],
+        std::slice::from_ref(&ref_update),
+        std::slice::from_ref(&import_proof),
+        &fixture_storage_edges,
+        now,
+    )?;
     let fixture = SourceGraphFixture {
         graph,
         writer_grant,
@@ -231,6 +257,7 @@ pub fn build_source_graph_fixture(now: u64) -> Result<SourceGraphFixture> {
         head_snapshot,
         ref_update,
         import_proof,
+        host_fabric_contribution,
     };
     validate_source_graph_fixture(&fixture)?;
     Ok(fixture)
@@ -245,9 +272,12 @@ pub fn default_source_graph_state(now: u64) -> Result<SourceGraphState> {
         ref_updates: vec![fixture.ref_update],
         import_proofs: vec![fixture.import_proof],
         storage_graph_edges: Vec::new(),
+        host_fabric_contributions: vec![fixture.host_fabric_contribution],
         updated_at: now,
     };
     state.storage_graph_edges = source_storage_graph_edges(&state.graph, &state.snapshots, now)?;
+    state.host_fabric_contributions =
+        vec![source_content_index_contribution_for_state(&state, now)?];
     validate_source_graph_state(&state)?;
     Ok(state)
 }
@@ -344,6 +374,10 @@ pub fn import_snapshot(
     state
         .storage_graph_edges
         .extend(storage_graph_edges.clone());
+    let host_fabric_contribution = source_content_index_contribution_for_state(state, request.now)?;
+    state
+        .host_fabric_contributions
+        .push(host_fabric_contribution.clone());
     state.updated_at = request.now;
     validate_source_graph_state(state)?;
 
@@ -351,6 +385,7 @@ pub fn import_snapshot(
         snapshot,
         import_proof,
         storage_graph_edges,
+        host_fabric_contribution,
     })
 }
 
@@ -589,6 +624,7 @@ pub fn source_graph_status(state: &SourceGraphState) -> Result<SourceGraphStatus
         ref_update_count: state.ref_updates.len(),
         import_proof_count: state.import_proofs.len(),
         storage_graph_edge_count: state.storage_graph_edges.len(),
+        host_fabric_contribution_count: state.host_fabric_contributions.len(),
     })
 }
 
@@ -599,11 +635,22 @@ pub fn validate_source_graph_fixture(fixture: &SourceGraphFixture) -> Result<()>
     validate_source_snapshot(&fixture.head_snapshot)?;
     validate_source_ref_update(&fixture.ref_update)?;
     validate_source_import_proof(&fixture.import_proof)?;
+    validate_host_fabric_member_contribution(&fixture.host_fabric_contribution)?;
     if fixture.graph.source_graph_ref != fixture.head_snapshot.source_graph_ref {
         return Err(anyhow!("graph and head snapshot sourceGraphRef diverge"));
     }
     if fixture.graph.head_snapshot_ref != fixture.head_snapshot.snapshot_ref {
         return Err(anyhow!("graph headSnapshotRef must match head snapshot"));
+    }
+    if fixture.host_fabric_contribution.role != FABRIC_MEMBER_ROLE_SOURCE_CONTENT_INDEX {
+        return Err(anyhow!(
+            "source fixture host-fabric contribution must be sourceContentIndex"
+        ));
+    }
+    if fixture.host_fabric_contribution.contract_ref != fixture.graph.source_graph_ref {
+        return Err(anyhow!(
+            "source fixture host-fabric contribution contract mismatch"
+        ));
     }
     Ok(())
 }
@@ -643,10 +690,125 @@ pub fn validate_source_graph_state(state: &SourceGraphState) -> Result<()> {
     for edge in &state.storage_graph_edges {
         validate_storage_graph_edge(edge)?;
     }
+    for host_fabric_contribution in &state.host_fabric_contributions {
+        validate_host_fabric_member_contribution(host_fabric_contribution)?;
+        if host_fabric_contribution.contract_ref != state.graph.source_graph_ref {
+            return Err(anyhow!(
+                "source state host-fabric contribution contract mismatch"
+            ));
+        }
+    }
     if state.updated_at == 0 {
         return Err(anyhow!("source graph state missing updatedAt"));
     }
     Ok(())
+}
+
+pub fn source_content_index_contribution_for_state(
+    state: &SourceGraphState,
+    now: u64,
+) -> Result<HostFabricMemberContribution> {
+    validate_source_version_graph(&state.graph)?;
+    source_content_index_contribution(
+        &state.graph,
+        &state.snapshots,
+        &state.ref_updates,
+        &state.import_proofs,
+        &state.storage_graph_edges,
+        now,
+    )
+}
+
+pub fn source_content_index_contribution(
+    graph: &SourceVersionGraph,
+    snapshots: &[SourceSnapshot],
+    ref_updates: &[SourceRefUpdate],
+    import_proofs: &[SourceImportProof],
+    storage_graph_edges: &[StorageGraphEdge],
+    now: u64,
+) -> Result<HostFabricMemberContribution> {
+    validate_source_version_graph(graph)?;
+    for snapshot in snapshots {
+        validate_source_snapshot(snapshot)?;
+    }
+    for update in ref_updates {
+        validate_source_ref_update(update)?;
+    }
+    for proof in import_proofs {
+        validate_source_import_proof(proof)?;
+    }
+    for edge in storage_graph_edges {
+        validate_storage_graph_edge(edge)?;
+    }
+
+    let blocked_reasons = graph.blocked_reasons.clone();
+    let ready = graph.state == SOURCE_GRAPH_STATE_READY && blocked_reasons.is_empty();
+    let output_refs = [
+        vec![graph.head_snapshot_ref.clone()],
+        graph.branch_refs.clone(),
+        graph.tag_refs.clone(),
+        storage_graph_edges
+            .iter()
+            .map(|edge| edge.edge_id.clone())
+            .collect(),
+    ]
+    .concat();
+    let evidence_refs = [
+        graph.evidence_refs.clone(),
+        import_proofs
+            .iter()
+            .map(|proof| proof.import_ref.clone())
+            .collect(),
+        ref_updates
+            .iter()
+            .map(|update| update.update_ref.clone())
+            .collect(),
+    ]
+    .concat();
+    let contribution = build_host_fabric_member_contribution(HostFabricMemberContributionSpec {
+        contribution_id: format!(
+            "fabric-contribution:source-content-index:{}",
+            short_ref_id(&graph.head_snapshot_ref)
+        ),
+        fabric_ref: DEFAULT_FABRIC_REF.to_string(),
+        host_ref: DEFAULT_HOST_REF.to_string(),
+        member_ref: DEFAULT_SOURCE_MEMBER_REF.to_string(),
+        role: FABRIC_MEMBER_ROLE_SOURCE_CONTENT_INDEX.to_string(),
+        state: if ready {
+            FABRIC_MEMBER_CONTRIBUTION_RUNNING.to_string()
+        } else {
+            FABRIC_MEMBER_CONTRIBUTION_BLOCKED.to_string()
+        },
+        contract_ref: graph.source_graph_ref.clone(),
+        subject_ref: graph.head_snapshot_ref.clone(),
+        capability_refs: vec!["capability:source:content-index".to_string()],
+        grant_refs: graph.writer_grant_refs.clone(),
+        input_refs: snapshots
+            .iter()
+            .map(|snapshot| snapshot.snapshot_ref.clone())
+            .collect(),
+        output_refs,
+        evidence_refs,
+        lifecycle_plan_refs: vec![format!(
+            "lifecycle-plan:source-content-index:{}",
+            short_ref_id(&graph.source_graph_ref)
+        )],
+        release_refs: graph.release_refs.clone(),
+        resource_posture: None,
+        blocked_reasons,
+        safe_facts: serde_json::json!({
+            "sourceGraphRef": graph.source_graph_ref,
+            "headSnapshotRef": graph.head_snapshot_ref,
+            "snapshotCount": snapshots.len(),
+            "refUpdateCount": ref_updates.len(),
+            "importProofCount": import_proofs.len(),
+            "storageGraphEdgeCount": storage_graph_edges.len()
+        }),
+        observed_at: now,
+        expires_at: graph.expires_at,
+    })?;
+    validate_host_fabric_member_contribution(&contribution)?;
+    Ok(contribution)
 }
 
 pub fn source_storage_graph_edges(

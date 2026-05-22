@@ -30,6 +30,9 @@ cargo run -- status --state target/source-graph-state.json
 - Source snapshot imports create storage graph-edge evidence from source
   snapshots to storage object refs; they do not move a branch until a ref update
   is reduced and applied.
+- Source graph fixtures and imports emit a host-fabric source-content-index
+  member contribution so fabric can reduce host composition posture without
+  owning source truth, branch movement, or storage bytes.
 - Build contracts and runners consume source refs; they do not become source
   truth.
 - Future Git compatibility should adapt Git pack/ref expectations to these

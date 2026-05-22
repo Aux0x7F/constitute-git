@@ -5,7 +5,9 @@ use constitute_git::{
     validate_source_graph_fixture, validate_source_graph_state,
 };
 use constitute_protocol::{
-    SOURCE_UPDATE_STATE_APPLIED, SOURCE_UPDATE_STATE_BLOCKED, validate_source_ref_update,
+    FABRIC_MEMBER_CONTRIBUTION_RUNNING, FABRIC_MEMBER_ROLE_SOURCE_CONTENT_INDEX,
+    SOURCE_UPDATE_STATE_APPLIED, SOURCE_UPDATE_STATE_BLOCKED,
+    validate_host_fabric_member_contribution, validate_source_ref_update,
 };
 use std::{fs, process::Command};
 
@@ -31,6 +33,20 @@ fn fixture_is_protocol_validated_source_graph() {
     );
     assert!(fixture.import_proof.safe_facts.get("payload").is_none());
     assert_eq!(fixture.ref_update.state, SOURCE_UPDATE_STATE_APPLIED);
+    validate_host_fabric_member_contribution(&fixture.host_fabric_contribution)
+        .expect("host-fabric contribution validates");
+    assert_eq!(
+        fixture.host_fabric_contribution.role,
+        FABRIC_MEMBER_ROLE_SOURCE_CONTENT_INDEX
+    );
+    assert_eq!(
+        fixture.host_fabric_contribution.state,
+        FABRIC_MEMBER_CONTRIBUTION_RUNNING
+    );
+    assert_eq!(
+        fixture.host_fabric_contribution.subject_ref,
+        fixture.graph.head_snapshot_ref
+    );
 }
 
 #[test]
@@ -150,6 +166,7 @@ fn source_graph_state_carries_snapshots_updates_and_storage_edges() {
     assert_eq!(status.snapshot_count, 2);
     assert_eq!(status.import_proof_count, 1);
     assert_eq!(status.storage_graph_edge_count, 2);
+    assert_eq!(status.host_fabric_contribution_count, 1);
     assert!(
         state
             .storage_graph_edges
@@ -181,8 +198,13 @@ fn source_import_adds_snapshot_import_proof_and_storage_edges() {
     .expect("import applies");
 
     assert_eq!(outcome.storage_graph_edges.len(), 1);
+    assert_eq!(
+        outcome.host_fabric_contribution.role,
+        FABRIC_MEMBER_ROLE_SOURCE_CONTENT_INDEX
+    );
     assert_eq!(state.snapshots.len(), 3);
     assert_eq!(state.import_proofs.len(), 2);
+    assert_eq!(state.host_fabric_contributions.len(), 2);
     assert!(
         state
             .snapshots
