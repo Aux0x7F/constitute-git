@@ -6,8 +6,9 @@ use constitute_git::{
 };
 use constitute_protocol::{
     FABRIC_MEMBER_CONTRIBUTION_RUNNING, FABRIC_MEMBER_ROLE_SOURCE_CONTENT_INDEX,
-    SOURCE_UPDATE_STATE_APPLIED, SOURCE_UPDATE_STATE_BLOCKED,
-    validate_host_fabric_member_contribution, validate_source_ref_update,
+    SOURCE_PROJECT_OPERATION_STATE_APPLIED, SOURCE_UPDATE_STATE_APPLIED,
+    SOURCE_UPDATE_STATE_BLOCKED, validate_host_fabric_member_contribution,
+    validate_source_project_operation, validate_source_ref_update,
 };
 use std::{fs, process::Command};
 
@@ -33,6 +34,12 @@ fn fixture_is_protocol_validated_source_graph() {
     );
     assert!(fixture.import_proof.safe_facts.get("payload").is_none());
     assert_eq!(fixture.ref_update.state, SOURCE_UPDATE_STATE_APPLIED);
+    assert_eq!(
+        fixture.source_project_operation.state,
+        SOURCE_PROJECT_OPERATION_STATE_APPLIED
+    );
+    validate_source_project_operation(&fixture.source_project_operation)
+        .expect("source operation validates");
     validate_host_fabric_member_contribution(&fixture.host_fabric_contribution)
         .expect("host-fabric contribution validates");
     assert_eq!(
@@ -165,6 +172,7 @@ fn source_graph_state_carries_snapshots_updates_and_storage_edges() {
     let status = source_graph_status(&state).expect("status builds");
     assert_eq!(status.snapshot_count, 2);
     assert_eq!(status.import_proof_count, 1);
+    assert_eq!(status.source_project_operation_count, 1);
     assert_eq!(status.storage_graph_edge_count, 2);
     assert_eq!(status.host_fabric_contribution_count, 1);
     assert!(
@@ -198,12 +206,15 @@ fn source_import_adds_snapshot_import_proof_and_storage_edges() {
     .expect("import applies");
 
     assert_eq!(outcome.storage_graph_edges.len(), 1);
+    validate_source_project_operation(&outcome.source_project_operation)
+        .expect("import operation validates");
     assert_eq!(
         outcome.host_fabric_contribution.role,
         FABRIC_MEMBER_ROLE_SOURCE_CONTENT_INDEX
     );
     assert_eq!(state.snapshots.len(), 3);
     assert_eq!(state.import_proofs.len(), 2);
+    assert_eq!(state.source_project_operations.len(), 2);
     assert_eq!(state.host_fabric_contributions.len(), 2);
     assert!(
         state
@@ -251,6 +262,7 @@ fn stateful_ref_apply_moves_head_only_when_applied() {
 
     assert_eq!(applied.state, SOURCE_UPDATE_STATE_APPLIED);
     assert_eq!(state.graph.head_snapshot_ref, outcome.snapshot.snapshot_ref);
+    assert_eq!(state.source_project_operations.len(), 3);
 
     let blocked = constitute_git::apply_ref_update(
         &mut state,
@@ -267,6 +279,7 @@ fn stateful_ref_apply_moves_head_only_when_applied() {
     .expect("blocked update reduces");
 
     assert_eq!(blocked.state, SOURCE_UPDATE_STATE_BLOCKED);
+    assert_eq!(state.source_project_operations.len(), 4);
     assert_eq!(state.graph.head_snapshot_ref, outcome.snapshot.snapshot_ref);
 }
 
@@ -350,6 +363,7 @@ fn cli_persists_source_graph_state() {
         serde_json::from_slice(&status.stdout).expect("status json parses");
     assert_eq!(status_json["headSnapshotRef"], snapshot_ref);
     assert_eq!(status_json["snapshotCount"], 3);
+    assert_eq!(status_json["sourceProjectOperationCount"], 3);
 
     let _ = fs::remove_file(&path);
 }
