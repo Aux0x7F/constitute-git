@@ -13,7 +13,7 @@ use constitute_protocol::{
     SourceWriterGrant, StorageGraphEdge, sha256_hex, source_ref,
     validate_host_fabric_member_contribution, validate_source_import_proof,
     validate_source_ref_update, validate_source_snapshot, validate_source_version_graph,
-    validate_source_writer_grant,
+    validate_source_writer_grant, validate_storage_graph_edge,
 };
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
@@ -856,45 +856,6 @@ fn source_storage_graph_edges_for_snapshot(
         edges.push(edge);
     }
     Ok(edges)
-}
-
-fn validate_storage_graph_edge(edge: &StorageGraphEdge) -> Result<()> {
-    if edge.edge_id.trim().is_empty() {
-        return Err(anyhow!("storage graph edge missing edgeId"));
-    }
-    if edge.container_id.trim().is_empty() {
-        return Err(anyhow!("storage graph edge missing containerId"));
-    }
-    if edge.from_ref.trim().is_empty() {
-        return Err(anyhow!("storage graph edge missing fromRef"));
-    }
-    if edge.relation.trim().is_empty() {
-        return Err(anyhow!("storage graph edge missing relation"));
-    }
-    if edge.to_ref.trim().is_empty() {
-        return Err(anyhow!("storage graph edge missing toRef"));
-    }
-    if edge.created_at == 0 {
-        return Err(anyhow!("storage graph edge missing createdAt"));
-    }
-    if [
-        &edge.edge_id,
-        &edge.container_id,
-        &edge.from_ref,
-        &edge.to_ref,
-    ]
-    .iter()
-    .any(|value| {
-        value.chars().any(char::is_whitespace)
-            || value.contains('\\')
-            || value.starts_with('/')
-            || value.starts_with("file:")
-            || value.starts_with("http:")
-            || value.starts_with("https:")
-    }) {
-        return Err(anyhow!("storage graph edge refs must be virtual refs"));
-    }
-    Ok(())
 }
 
 fn short_ref_id(value: &str) -> String {
