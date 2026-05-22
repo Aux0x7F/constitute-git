@@ -4,16 +4,20 @@ use constitute_fabric::{HostFabricMemberContributionSpec, build_host_fabric_memb
 use constitute_protocol::{
     FABRIC_MEMBER_CONTRIBUTION_BLOCKED, FABRIC_MEMBER_CONTRIBUTION_RUNNING,
     FABRIC_MEMBER_ROLE_SOURCE_CONTENT_INDEX, HostFabricMemberContribution,
-    RECORD_SOURCE_IMPORT_PROOF, RECORD_SOURCE_REF_UPDATE, RECORD_SOURCE_SNAPSHOT,
-    RECORD_SOURCE_VERSION_GRAPH, RECORD_SOURCE_WRITER_GRANT, SOURCE_GRAPH_STATE_READY,
-    SOURCE_IMPORT_STATE_IMPORTED, SOURCE_OPERATION_FETCH, SOURCE_OPERATION_IMPORT,
-    SOURCE_OPERATION_PUSH, SOURCE_OPERATION_REF_UPDATE, SOURCE_OPERATION_STATUS,
-    SOURCE_REF_KIND_BRANCH, SOURCE_UPDATE_STATE_APPLIED, SOURCE_UPDATE_STATE_BLOCKED,
-    SourceGraphPolicy, SourceImportProof, SourceRefUpdate, SourceSnapshot, SourceVersionGraph,
-    SourceWriterGrant, StorageGraphEdge, sha256_hex, source_ref,
+    RECORD_SOURCE_IMPORT_PROOF, RECORD_SOURCE_PROJECT_OPERATION, RECORD_SOURCE_REF_UPDATE,
+    RECORD_SOURCE_SNAPSHOT, RECORD_SOURCE_VERSION_GRAPH, RECORD_SOURCE_WRITER_GRANT,
+    SOURCE_GRAPH_STATE_READY, SOURCE_IMPORT_STATE_IMPORTED, SOURCE_OPERATION_FETCH,
+    SOURCE_OPERATION_IMPORT, SOURCE_OPERATION_PROJECT_LINK, SOURCE_OPERATION_PUSH,
+    SOURCE_OPERATION_REF_UPDATE, SOURCE_OPERATION_STATUS, SOURCE_PROJECT_COMPATIBILITY_SUPPORTED,
+    SOURCE_PROJECT_OPERATION_STATE_APPLIED, SOURCE_PROJECT_OPERATION_STATE_BLOCKED,
+    SOURCE_PROJECT_OPERATION_STATE_REJECTED, SOURCE_PROJECT_OPERATION_STATE_REQUESTED,
+    SOURCE_PROJECT_OPERATION_STATE_SUPERSEDED, SOURCE_REF_KIND_BRANCH, SOURCE_UPDATE_STATE_APPLIED,
+    SOURCE_UPDATE_STATE_BLOCKED, SOURCE_UPDATE_STATE_REJECTED, SOURCE_UPDATE_STATE_SUPERSEDED,
+    SourceGraphPolicy, SourceImportProof, SourceProjectOperation, SourceRefUpdate, SourceSnapshot,
+    SourceVersionGraph, SourceWriterGrant, StorageGraphEdge, sha256_hex, source_ref,
     validate_host_fabric_member_contribution, validate_source_import_proof,
-    validate_source_ref_update, validate_source_snapshot, validate_source_version_graph,
-    validate_source_writer_grant, validate_storage_graph_edge,
+    validate_source_project_operation, validate_source_ref_update, validate_source_snapshot,
+    validate_source_version_graph, validate_source_writer_grant, validate_storage_graph_edge,
 };
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
@@ -41,6 +45,7 @@ pub struct SourceGraphFixture {
     pub head_snapshot: SourceSnapshot,
     pub ref_update: SourceRefUpdate,
     pub import_proof: SourceImportProof,
+    pub source_project_operation: SourceProjectOperation,
     pub host_fabric_contribution: HostFabricMemberContribution,
 }
 
@@ -56,6 +61,7 @@ pub struct SourceGraphStatus {
     pub snapshot_count: usize,
     pub ref_update_count: usize,
     pub import_proof_count: usize,
+    pub source_project_operation_count: usize,
     pub storage_graph_edge_count: usize,
     pub host_fabric_contribution_count: usize,
 }
@@ -72,6 +78,8 @@ pub struct SourceGraphState {
     pub ref_updates: Vec<SourceRefUpdate>,
     #[serde(default)]
     pub import_proofs: Vec<SourceImportProof>,
+    #[serde(default)]
+    pub source_project_operations: Vec<SourceProjectOperation>,
     #[serde(default)]
     pub storage_graph_edges: Vec<StorageGraphEdge>,
     #[serde(default)]
@@ -94,13 +102,31 @@ pub struct SourceImportRequest {
     pub now: u64,
 }
 
+#[derive(Clone, Debug)]
+pub struct SourceProjectLinkRequest {
+    pub project_refs: Vec<String>,
+    pub work_item_refs: Vec<String>,
+    pub actor_ref: String,
+    pub evidence_refs: Vec<String>,
+    pub now: u64,
+    pub expires_at: Option<u64>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceImportOutcome {
     pub snapshot: SourceSnapshot,
     pub import_proof: SourceImportProof,
+    pub source_project_operation: SourceProjectOperation,
     #[serde(default)]
     pub storage_graph_edges: Vec<StorageGraphEdge>,
+    pub host_fabric_contribution: HostFabricMemberContribution,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceProjectLinkOutcome {
+    pub source_project_operation: SourceProjectOperation,
     pub host_fabric_contribution: HostFabricMemberContribution,
 }
 
@@ -242,11 +268,14 @@ pub fn build_source_graph_fixture(now: u64) -> Result<SourceGraphFixture> {
         &[parent_snapshot.clone(), head_snapshot.clone()],
         now,
     )?;
+    let source_project_operation =
+        source_project_operation_for_ref_update(&graph, &ref_update, now)?;
     let host_fabric_contribution = source_content_index_contribution(
         &graph,
         &[parent_snapshot.clone(), head_snapshot.clone()],
         std::slice::from_ref(&ref_update),
         std::slice::from_ref(&import_proof),
+        std::slice::from_ref(&source_project_operation),
         &fixture_storage_edges,
         now,
     )?;
@@ -257,6 +286,7 @@ pub fn build_source_graph_fixture(now: u64) -> Result<SourceGraphFixture> {
         head_snapshot,
         ref_update,
         import_proof,
+        source_project_operation,
         host_fabric_contribution,
     };
     validate_source_graph_fixture(&fixture)?;
@@ -271,6 +301,7 @@ pub fn default_source_graph_state(now: u64) -> Result<SourceGraphState> {
         snapshots: vec![fixture.parent_snapshot, fixture.head_snapshot],
         ref_updates: vec![fixture.ref_update],
         import_proofs: vec![fixture.import_proof],
+        source_project_operations: vec![fixture.source_project_operation],
         storage_graph_edges: Vec::new(),
         host_fabric_contributions: vec![fixture.host_fabric_contribution],
         updated_at: now,
@@ -368,9 +399,14 @@ pub fn import_snapshot(
 
     let storage_graph_edges =
         source_storage_graph_edges_for_snapshot(&state.graph, &snapshot, request.now)?;
+    let source_project_operation =
+        source_project_operation_for_import(&state.graph, &snapshot, &import_proof, request.now)?;
 
     state.snapshots.push(snapshot.clone());
     state.import_proofs.push(import_proof.clone());
+    state
+        .source_project_operations
+        .push(source_project_operation.clone());
     state
         .storage_graph_edges
         .extend(storage_graph_edges.clone());
@@ -384,6 +420,7 @@ pub fn import_snapshot(
     Ok(SourceImportOutcome {
         snapshot,
         import_proof,
+        source_project_operation,
         storage_graph_edges,
         host_fabric_contribution,
     })
@@ -414,8 +451,186 @@ pub fn apply_ref_update(
         state.updated_at = update.signed_at;
     }
     state.ref_updates.push(update.clone());
+    let source_project_operation =
+        source_project_operation_for_ref_update(&state.graph, &update, update.signed_at)?;
+    state
+        .source_project_operations
+        .push(source_project_operation);
     validate_source_graph_state(state)?;
     Ok(update)
+}
+
+pub fn link_project_work(
+    state: &mut SourceGraphState,
+    request: SourceProjectLinkRequest,
+) -> Result<SourceProjectLinkOutcome> {
+    validate_source_graph_state(state)?;
+    if request.project_refs.is_empty() && request.work_item_refs.is_empty() {
+        return Err(anyhow!(
+            "project link requires project refs or work item refs"
+        ));
+    }
+    if request.actor_ref.trim().is_empty() {
+        return Err(anyhow!("project link requires actorRef"));
+    }
+    if request.evidence_refs.is_empty() {
+        return Err(anyhow!("project link requires evidenceRefs"));
+    }
+    let operation_ref = source_ref(
+        "operation",
+        &short_ref_id(&format!(
+            "{}|{}|{}",
+            request.project_refs.join(","),
+            request.work_item_refs.join(","),
+            request.now
+        )),
+    );
+    let operation = SourceProjectOperation {
+        kind: Some(RECORD_SOURCE_PROJECT_OPERATION.to_string()),
+        operation_ref,
+        source_graph_ref: state.graph.source_graph_ref.clone(),
+        subject_ref: state.graph.source_graph_ref.clone(),
+        actor_ref: request.actor_ref,
+        operation: SOURCE_OPERATION_PROJECT_LINK.to_string(),
+        state: SOURCE_PROJECT_OPERATION_STATE_APPLIED.to_string(),
+        compatibility_state: SOURCE_PROJECT_COMPATIBILITY_SUPPORTED.to_string(),
+        scope_refs: state.graph.branch_refs.clone(),
+        source_snapshot_refs: vec![state.graph.head_snapshot_ref.clone()],
+        content_index_refs: vec![content_index_ref_for_graph(&state.graph)],
+        storage_refs: Vec::new(),
+        branch_refs: state.graph.branch_refs.clone(),
+        tag_refs: state.graph.tag_refs.clone(),
+        release_refs: state.graph.release_refs.clone(),
+        project_refs: request.project_refs,
+        work_item_refs: request.work_item_refs,
+        build_target_refs: Vec::new(),
+        build_profile_refs: Vec::new(),
+        build_proof_refs: Vec::new(),
+        compatibility_refs: vec!["compat:project:workflow-adapter-v1".to_string()],
+        proof_refs: Vec::new(),
+        evidence_refs: request.evidence_refs,
+        rollback_refs: Vec::new(),
+        blocked_reasons: Vec::new(),
+        safe_facts: serde_json::json!({
+            "operation": "projectLink",
+            "state": "applied"
+        }),
+        issued_at: request.now,
+        expires_at: request.expires_at,
+    };
+    validate_source_project_operation(&operation)?;
+    state.source_project_operations.push(operation.clone());
+    let host_fabric_contribution = source_content_index_contribution_for_state(state, request.now)?;
+    state
+        .host_fabric_contributions
+        .push(host_fabric_contribution.clone());
+    state.updated_at = request.now;
+    validate_source_graph_state(state)?;
+    Ok(SourceProjectLinkOutcome {
+        source_project_operation: operation,
+        host_fabric_contribution,
+    })
+}
+
+fn source_project_operation_for_import(
+    graph: &SourceVersionGraph,
+    snapshot: &SourceSnapshot,
+    proof: &SourceImportProof,
+    now: u64,
+) -> Result<SourceProjectOperation> {
+    let operation = SourceProjectOperation {
+        kind: Some(RECORD_SOURCE_PROJECT_OPERATION.to_string()),
+        operation_ref: source_ref("operation", &short_ref_id(&proof.import_ref)),
+        source_graph_ref: graph.source_graph_ref.clone(),
+        subject_ref: snapshot.snapshot_ref.clone(),
+        actor_ref: snapshot.author_ref.clone(),
+        operation: SOURCE_OPERATION_IMPORT.to_string(),
+        state: SOURCE_PROJECT_OPERATION_STATE_APPLIED.to_string(),
+        compatibility_state: SOURCE_PROJECT_COMPATIBILITY_SUPPORTED.to_string(),
+        scope_refs: vec![graph.default_branch_ref.clone()],
+        source_snapshot_refs: vec![snapshot.snapshot_ref.clone()],
+        content_index_refs: vec![content_index_ref_for_graph(graph)],
+        storage_refs: snapshot.storage_object_refs.clone(),
+        branch_refs: vec![graph.default_branch_ref.clone()],
+        tag_refs: Vec::new(),
+        release_refs: graph.release_refs.clone(),
+        project_refs: vec!["project:constituency".to_string()],
+        work_item_refs: vec!["work-item:git-project-hardening".to_string()],
+        build_target_refs: Vec::new(),
+        build_profile_refs: Vec::new(),
+        build_proof_refs: Vec::new(),
+        compatibility_refs: vec!["compat:git:source-import-v1".to_string()],
+        proof_refs: vec![proof.import_ref.clone()],
+        evidence_refs: proof.evidence_refs.clone(),
+        rollback_refs: Vec::new(),
+        blocked_reasons: Vec::new(),
+        safe_facts: serde_json::json!({
+            "operation": "import",
+            "storageObjectCount": snapshot.storage_object_refs.len()
+        }),
+        issued_at: now,
+        expires_at: graph.expires_at,
+    };
+    validate_source_project_operation(&operation)?;
+    Ok(operation)
+}
+
+fn source_project_operation_for_ref_update(
+    graph: &SourceVersionGraph,
+    update: &SourceRefUpdate,
+    now: u64,
+) -> Result<SourceProjectOperation> {
+    let operation_state = match update.state.as_str() {
+        SOURCE_UPDATE_STATE_APPLIED => SOURCE_PROJECT_OPERATION_STATE_APPLIED,
+        SOURCE_UPDATE_STATE_BLOCKED => SOURCE_PROJECT_OPERATION_STATE_BLOCKED,
+        SOURCE_UPDATE_STATE_REJECTED => SOURCE_PROJECT_OPERATION_STATE_REJECTED,
+        SOURCE_UPDATE_STATE_SUPERSEDED => SOURCE_PROJECT_OPERATION_STATE_SUPERSEDED,
+        _ => SOURCE_PROJECT_OPERATION_STATE_REQUESTED,
+    };
+    let branch_ref = source_ref("ref", &update.ref_name.replace("refs/heads/", ""));
+    let operation = SourceProjectOperation {
+        kind: Some(RECORD_SOURCE_PROJECT_OPERATION.to_string()),
+        operation_ref: source_ref("operation", &short_ref_id(&update.update_ref)),
+        source_graph_ref: update.source_graph_ref.clone(),
+        subject_ref: branch_ref.clone(),
+        actor_ref: update.writer_ref.clone(),
+        operation: SOURCE_OPERATION_REF_UPDATE.to_string(),
+        state: operation_state.to_string(),
+        compatibility_state: SOURCE_PROJECT_COMPATIBILITY_SUPPORTED.to_string(),
+        scope_refs: vec![branch_ref.clone()],
+        source_snapshot_refs: vec![update.to_snapshot_ref.clone()],
+        content_index_refs: vec![content_index_ref_for_graph(graph)],
+        storage_refs: Vec::new(),
+        branch_refs: vec![branch_ref],
+        tag_refs: Vec::new(),
+        release_refs: graph.release_refs.clone(),
+        project_refs: vec!["project:constituency".to_string()],
+        work_item_refs: vec!["work-item:git-project-hardening".to_string()],
+        build_target_refs: Vec::new(),
+        build_profile_refs: Vec::new(),
+        build_proof_refs: Vec::new(),
+        compatibility_refs: vec!["compat:git:ref-update-v1".to_string()],
+        proof_refs: update.witness_refs.clone(),
+        evidence_refs: update.evidence_refs.clone(),
+        rollback_refs: update.from_snapshot_ref.clone().into_iter().collect(),
+        blocked_reasons: update.blocked_reasons.clone(),
+        safe_facts: serde_json::json!({
+            "operation": "refUpdate",
+            "refName": update.ref_name.clone(),
+            "state": update.state.clone()
+        }),
+        issued_at: now,
+        expires_at: update.valid_until,
+    };
+    validate_source_project_operation(&operation)?;
+    Ok(operation)
+}
+
+fn content_index_ref_for_graph(graph: &SourceVersionGraph) -> String {
+    format!(
+        "content-index:source:{}",
+        short_ref_id(&graph.source_graph_ref)
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -623,6 +838,7 @@ pub fn source_graph_status(state: &SourceGraphState) -> Result<SourceGraphStatus
         snapshot_count: state.snapshots.len(),
         ref_update_count: state.ref_updates.len(),
         import_proof_count: state.import_proofs.len(),
+        source_project_operation_count: state.source_project_operations.len(),
         storage_graph_edge_count: state.storage_graph_edges.len(),
         host_fabric_contribution_count: state.host_fabric_contributions.len(),
     })
@@ -678,6 +894,14 @@ pub fn validate_source_graph_state(state: &SourceGraphState) -> Result<()> {
             return Err(anyhow!("source state import sourceGraphRef diverges"));
         }
     }
+    for operation in &state.source_project_operations {
+        validate_source_project_operation(operation)?;
+        if operation.source_graph_ref != state.graph.source_graph_ref {
+            return Err(anyhow!(
+                "source state project operation sourceGraphRef diverges"
+            ));
+        }
+    }
     if !snapshot_known(
         &state.snapshots,
         &state.graph.source_graph_ref,
@@ -714,6 +938,7 @@ pub fn source_content_index_contribution_for_state(
         &state.snapshots,
         &state.ref_updates,
         &state.import_proofs,
+        &state.source_project_operations,
         &state.storage_graph_edges,
         now,
     )
@@ -724,6 +949,7 @@ pub fn source_content_index_contribution(
     snapshots: &[SourceSnapshot],
     ref_updates: &[SourceRefUpdate],
     import_proofs: &[SourceImportProof],
+    source_project_operations: &[SourceProjectOperation],
     storage_graph_edges: &[StorageGraphEdge],
     now: u64,
 ) -> Result<HostFabricMemberContribution> {
@@ -736,6 +962,9 @@ pub fn source_content_index_contribution(
     }
     for proof in import_proofs {
         validate_source_import_proof(proof)?;
+    }
+    for operation in source_project_operations {
+        validate_source_project_operation(operation)?;
     }
     for edge in storage_graph_edges {
         validate_storage_graph_edge(edge)?;
@@ -762,6 +991,10 @@ pub fn source_content_index_contribution(
         ref_updates
             .iter()
             .map(|update| update.update_ref.clone())
+            .collect(),
+        source_project_operations
+            .iter()
+            .map(|operation| operation.operation_ref.clone())
             .collect(),
     ]
     .concat();
@@ -802,6 +1035,7 @@ pub fn source_content_index_contribution(
             "snapshotCount": snapshots.len(),
             "refUpdateCount": ref_updates.len(),
             "importProofCount": import_proofs.len(),
+            "sourceProjectOperationCount": source_project_operations.len(),
             "storageGraphEdgeCount": storage_graph_edges.len()
         }),
         observed_at: now,

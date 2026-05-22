@@ -1,8 +1,8 @@
 use anyhow::{Result, anyhow};
 use constitute_git::{
-    SourceImportRequest, SourceRefUpdateOptions, SourceRefUpdateRequest, apply_ref_update,
-    build_ref_update, build_source_graph_fixture, build_status, default_now,
-    default_source_graph_state, import_snapshot, load_source_graph_state,
+    SourceImportRequest, SourceProjectLinkRequest, SourceRefUpdateOptions, SourceRefUpdateRequest,
+    apply_ref_update, build_ref_update, build_source_graph_fixture, build_status, default_now,
+    default_source_graph_state, import_snapshot, link_project_work, load_source_graph_state,
     reduce_fixture_ref_update, save_source_graph_state, source_graph_status,
 };
 use constitute_protocol::validate_source_ref_update;
@@ -19,6 +19,7 @@ fn main() -> Result<()> {
         "fixture" => fixture_command(args),
         "init" => init_command(args),
         "import" => import_command(args),
+        "project" => project_command(args),
         "ref" => ref_command(args),
         "status" => status_command(args),
         command => Err(anyhow!("unsupported constitute-git command: {command}")),
@@ -78,6 +79,21 @@ fn import_command(mut args: Vec<String>) -> Result<()> {
         }
         Some(name) => Err(anyhow!("unsupported import command: {name}")),
         None => Err(anyhow!("import command requires a subcommand")),
+    }
+}
+
+fn project_command(mut args: Vec<String>) -> Result<()> {
+    match args.first().map(String::as_str) {
+        Some("link") => {
+            args.remove(0);
+            let (state_path, request) = parse_project_link_args(args)?;
+            let mut state = load_source_graph_state(&state_path, request.now)?;
+            let outcome = link_project_work(&mut state, request)?;
+            save_source_graph_state(&state_path, &state)?;
+            print_json(&outcome)
+        }
+        Some(name) => Err(anyhow!("unsupported project command: {name}")),
+        None => Err(anyhow!("project command requires a subcommand")),
     }
 }
 
@@ -316,6 +332,72 @@ fn parse_import_snapshot_args(args: Vec<String>) -> Result<(String, SourceImport
     ))
 }
 
+fn parse_project_link_args(args: Vec<String>) -> Result<(String, SourceProjectLinkRequest)> {
+    let mut state_path = "target/source-graph-state.json".to_string();
+    let mut project_refs = vec!["project:constituency".to_string()];
+    let mut work_item_refs = vec!["work-item:git-project-hardening".to_string()];
+    let mut actor_ref = "identity:device:agent".to_string();
+    let mut evidence_refs = vec!["adapter:project:workflow-link".to_string()];
+    let mut now = default_now() + 4;
+    let mut expires_at = Some(now + 86_400_000);
+
+    let mut iter = args.into_iter();
+    while let Some(flag) = iter.next() {
+        let value = iter
+            .next()
+            .ok_or_else(|| anyhow!("{flag} requires a value"))?;
+        match flag.as_str() {
+            "--state" => state_path = value,
+            "--project" => project_refs.push(value),
+            "--clear-default-project" => {
+                if value != "true" {
+                    return Err(anyhow!("--clear-default-project expects true"));
+                }
+                project_refs.clear();
+            }
+            "--work-item" => work_item_refs.push(value),
+            "--clear-default-work-item" => {
+                if value != "true" {
+                    return Err(anyhow!("--clear-default-work-item expects true"));
+                }
+                work_item_refs.clear();
+            }
+            "--actor" => actor_ref = value,
+            "--evidence" => evidence_refs.push(value),
+            "--clear-default-evidence" => {
+                if value != "true" {
+                    return Err(anyhow!("--clear-default-evidence expects true"));
+                }
+                evidence_refs.clear();
+            }
+            "--now" => {
+                now = value.parse::<u64>()?;
+                expires_at = Some(now + 86_400_000);
+            }
+            "--expires-at" => expires_at = Some(value.parse::<u64>()?),
+            "--no-expires" => {
+                if value != "true" {
+                    return Err(anyhow!("--no-expires expects true"));
+                }
+                expires_at = None;
+            }
+            _ => return Err(anyhow!("unsupported project link flag: {flag}")),
+        }
+    }
+
+    Ok((
+        state_path,
+        SourceProjectLinkRequest {
+            project_refs,
+            work_item_refs,
+            actor_ref,
+            evidence_refs,
+            now,
+            expires_at,
+        },
+    ))
+}
+
 fn parse_state_and_now(args: Vec<String>) -> Result<(String, u64)> {
     let (state_path, now, _) = parse_optional_state_and_now(args)?;
     Ok((state_path, now))
@@ -351,6 +433,6 @@ fn print_json(value: &impl serde::Serialize) -> Result<()> {
 
 fn print_help() {
     println!(
-        "constitute-git\n\nCommands:\n  init --state target/source-graph-state.json\n  fixture graph\n  import snapshot --state target/source-graph-state.json [--commit git:commit:next] [--storage-object storage:object:pack]\n  ref update [--state applied|blocked|rejected] [--branch main] [--from source:snapshot:old] [--to source:snapshot:new]\n  ref reduce [--branch main] [--from source:snapshot:parent] [--to source:snapshot:head] [--writer identity:device:agent]\n  ref apply --state target/source-graph-state.json [--branch main] [--from source:snapshot:parent] [--to source:snapshot:head]\n  status [--state target/source-graph-state.json]"
+        "constitute-git\n\nCommands:\n  init --state target/source-graph-state.json\n  fixture graph\n  import snapshot --state target/source-graph-state.json [--commit git:commit:next] [--storage-object storage:object:pack]\n  project link --state target/source-graph-state.json [--project project:constituency] [--work-item work-item:git-project-hardening]\n  ref update [--state applied|blocked|rejected] [--branch main] [--from source:snapshot:old] [--to source:snapshot:new]\n  ref reduce [--branch main] [--from source:snapshot:parent] [--to source:snapshot:head] [--writer identity:device:agent]\n  ref apply --state target/source-graph-state.json [--branch main] [--from source:snapshot:parent] [--to source:snapshot:head]\n  status [--state target/source-graph-state.json]"
     );
 }

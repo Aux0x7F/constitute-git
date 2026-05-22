@@ -3,8 +3,9 @@
 Rust CLI and library for Constitution source/version graph records.
 
 `constitute-git` is the corporeal interface for source refs, branch/tag updates,
-writer grants, and import proof. It does not build releases, host modules, or
-own storage bytes. Source objects and pack material are represented by storage
+writer grants, import proof, and project/work-item link posture. It does not
+build releases, host modules, own storage bytes, or make GitHub Project the
+source primitive. Source objects and pack material are represented by storage
 refs and evidence refs.
 
 ## Commands
@@ -13,6 +14,7 @@ refs and evidence refs.
 cargo run -- init --state target/source-graph-state.json
 cargo run -- fixture graph
 cargo run -- import snapshot --state target/source-graph-state.json --storage-object storage:object:pack-next
+cargo run -- project link --state target/source-graph-state.json --project project:constituency --work-item work-item:git-project-hardening
 cargo run -- ref update --state applied --branch main --from source:snapshot:old --to source:snapshot:new
 cargo run -- ref reduce --branch main --from source:snapshot:parent --to source:snapshot:head
 cargo run -- ref apply --state target/source-graph-state.json --from source:snapshot:head --to source:snapshot:new
@@ -30,6 +32,9 @@ cargo run -- status --state target/source-graph-state.json
 - Source snapshot imports create storage graph-edge evidence from source
   snapshots to storage object refs; they do not move a branch until a ref update
   is reduced and applied.
+- Project/work-item links are source project operation posture. GitHub Project
+  can be adapter evidence, but source graph truth only stores virtual project
+  and work-item refs.
 - Source graph fixtures and imports emit a host-fabric source-content-index
   member contribution so fabric can reduce host composition posture without
   owning source truth, branch movement, or storage bytes.

@@ -1,13 +1,15 @@
 use constitute_git::{
-    SourceImportRequest, SourceRefUpdateOptions, SourceRefUpdateRequest, build_ref_update,
-    build_source_graph_fixture, build_status, default_now, default_source_graph_state,
-    import_snapshot, reduce_fixture_ref_update, reduce_ref_update, source_graph_status,
-    validate_source_graph_fixture, validate_source_graph_state,
+    SourceImportRequest, SourceProjectLinkRequest, SourceRefUpdateOptions, SourceRefUpdateRequest,
+    build_ref_update, build_source_graph_fixture, build_status, default_now,
+    default_source_graph_state, import_snapshot, link_project_work, reduce_fixture_ref_update,
+    reduce_ref_update, source_graph_status, validate_source_graph_fixture,
+    validate_source_graph_state,
 };
 use constitute_protocol::{
     FABRIC_MEMBER_CONTRIBUTION_RUNNING, FABRIC_MEMBER_ROLE_SOURCE_CONTENT_INDEX,
-    SOURCE_UPDATE_STATE_APPLIED, SOURCE_UPDATE_STATE_BLOCKED,
-    validate_host_fabric_member_contribution, validate_source_ref_update,
+    SOURCE_PROJECT_OPERATION_STATE_APPLIED, SOURCE_UPDATE_STATE_APPLIED,
+    SOURCE_UPDATE_STATE_BLOCKED, validate_host_fabric_member_contribution,
+    validate_source_project_operation, validate_source_ref_update,
 };
 use std::{fs, process::Command};
 
@@ -33,6 +35,12 @@ fn fixture_is_protocol_validated_source_graph() {
     );
     assert!(fixture.import_proof.safe_facts.get("payload").is_none());
     assert_eq!(fixture.ref_update.state, SOURCE_UPDATE_STATE_APPLIED);
+    assert_eq!(
+        fixture.source_project_operation.state,
+        SOURCE_PROJECT_OPERATION_STATE_APPLIED
+    );
+    validate_source_project_operation(&fixture.source_project_operation)
+        .expect("source operation validates");
     validate_host_fabric_member_contribution(&fixture.host_fabric_contribution)
         .expect("host-fabric contribution validates");
     assert_eq!(
@@ -165,6 +173,7 @@ fn source_graph_state_carries_snapshots_updates_and_storage_edges() {
     let status = source_graph_status(&state).expect("status builds");
     assert_eq!(status.snapshot_count, 2);
     assert_eq!(status.import_proof_count, 1);
+    assert_eq!(status.source_project_operation_count, 1);
     assert_eq!(status.storage_graph_edge_count, 2);
     assert_eq!(status.host_fabric_contribution_count, 1);
     assert!(
@@ -198,12 +207,15 @@ fn source_import_adds_snapshot_import_proof_and_storage_edges() {
     .expect("import applies");
 
     assert_eq!(outcome.storage_graph_edges.len(), 1);
+    validate_source_project_operation(&outcome.source_project_operation)
+        .expect("import operation validates");
     assert_eq!(
         outcome.host_fabric_contribution.role,
         FABRIC_MEMBER_ROLE_SOURCE_CONTENT_INDEX
     );
     assert_eq!(state.snapshots.len(), 3);
     assert_eq!(state.import_proofs.len(), 2);
+    assert_eq!(state.source_project_operations.len(), 2);
     assert_eq!(state.host_fabric_contributions.len(), 2);
     assert!(
         state
@@ -251,6 +263,7 @@ fn stateful_ref_apply_moves_head_only_when_applied() {
 
     assert_eq!(applied.state, SOURCE_UPDATE_STATE_APPLIED);
     assert_eq!(state.graph.head_snapshot_ref, outcome.snapshot.snapshot_ref);
+    assert_eq!(state.source_project_operations.len(), 3);
 
     let blocked = constitute_git::apply_ref_update(
         &mut state,
@@ -267,7 +280,47 @@ fn stateful_ref_apply_moves_head_only_when_applied() {
     .expect("blocked update reduces");
 
     assert_eq!(blocked.state, SOURCE_UPDATE_STATE_BLOCKED);
+    assert_eq!(state.source_project_operations.len(), 4);
     assert_eq!(state.graph.head_snapshot_ref, outcome.snapshot.snapshot_ref);
+}
+
+#[test]
+fn project_link_operation_records_adapter_posture_without_github_ownership() {
+    let mut state = default_source_graph_state(default_now()).expect("state builds");
+    let outcome = link_project_work(
+        &mut state,
+        SourceProjectLinkRequest {
+            project_refs: vec!["project:constituency".to_string()],
+            work_item_refs: vec!["work-item:git-project-hardening".to_string()],
+            actor_ref: "identity:device:agent".to_string(),
+            evidence_refs: vec!["adapter:github-project:item:git-hardening".to_string()],
+            now: default_now() + 4,
+            expires_at: Some(default_now() + 86_400_000),
+        },
+    )
+    .expect("project link applies");
+
+    validate_source_project_operation(&outcome.source_project_operation)
+        .expect("project link operation validates");
+    assert_eq!(
+        outcome.source_project_operation.operation,
+        constitute_protocol::SOURCE_OPERATION_PROJECT_LINK
+    );
+    assert_eq!(
+        outcome.source_project_operation.project_refs,
+        vec!["project:constituency"]
+    );
+    assert_eq!(
+        outcome.source_project_operation.work_item_refs,
+        vec!["work-item:git-project-hardening"]
+    );
+    assert_eq!(state.source_project_operations.len(), 2);
+    assert_eq!(state.host_fabric_contributions.len(), 2);
+    assert!(
+        !serde_json::to_string(&outcome.source_project_operation)
+            .expect("json")
+            .contains("https://api.github.com")
+    );
 }
 
 #[test]
@@ -336,6 +389,39 @@ fn cli_persists_source_graph_state() {
         String::from_utf8_lossy(&apply.stderr)
     );
 
+    let project = Command::new(bin)
+        .args(["project", "link", "--state"])
+        .arg(&path)
+        .args([
+            "--clear-default-project",
+            "true",
+            "--project",
+            "project:constituency",
+            "--clear-default-work-item",
+            "true",
+            "--work-item",
+            "work-item:git-project-hardening",
+            "--clear-default-evidence",
+            "true",
+            "--evidence",
+            "adapter:project:cli",
+            "--now",
+            "1779265000003",
+        ])
+        .output()
+        .expect("project link runs");
+    assert!(
+        project.status.success(),
+        "{}",
+        String::from_utf8_lossy(&project.stderr)
+    );
+    let project_json: serde_json::Value =
+        serde_json::from_slice(&project.stdout).expect("project json parses");
+    assert_eq!(
+        project_json["sourceProjectOperation"]["operation"],
+        "projectLink"
+    );
+
     let status = Command::new(bin)
         .args(["status", "--state"])
         .arg(&path)
@@ -350,6 +436,7 @@ fn cli_persists_source_graph_state() {
         serde_json::from_slice(&status.stdout).expect("status json parses");
     assert_eq!(status_json["headSnapshotRef"], snapshot_ref);
     assert_eq!(status_json["snapshotCount"], 3);
+    assert_eq!(status_json["sourceProjectOperationCount"], 4);
 
     let _ = fs::remove_file(&path);
 }
