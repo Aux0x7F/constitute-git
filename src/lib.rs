@@ -1006,7 +1006,9 @@ pub fn source_content_index_contribution(
         fabric_ref: DEFAULT_FABRIC_REF.to_string(),
         host_ref: DEFAULT_HOST_REF.to_string(),
         member_ref: DEFAULT_SOURCE_MEMBER_REF.to_string(),
+        participant_ref: graph.owner_ref.clone(),
         role: FABRIC_MEMBER_ROLE_SOURCE_CONTENT_INDEX.to_string(),
+        role_ref: format!("role:{FABRIC_MEMBER_ROLE_SOURCE_CONTENT_INDEX}"),
         state: if ready {
             FABRIC_MEMBER_CONTRIBUTION_RUNNING.to_string()
         } else {
@@ -1014,6 +1016,28 @@ pub fn source_content_index_contribution(
         },
         contract_ref: graph.source_graph_ref.clone(),
         subject_ref: graph.head_snapshot_ref.clone(),
+        module_refs: vec![
+            "module:source-content-index".to_string(),
+            "adapter:git:source-graph".to_string(),
+        ],
+        source_refs: [
+            vec![graph.source_graph_ref.clone(), graph.head_snapshot_ref.clone()],
+            graph.branch_refs.clone(),
+            graph.tag_refs.clone(),
+            snapshots
+                .iter()
+                .map(|snapshot| snapshot.snapshot_ref.clone())
+                .collect(),
+            ref_updates
+                .iter()
+                .map(|update| update.update_ref.clone())
+                .collect(),
+            import_proofs
+                .iter()
+                .map(|proof| proof.import_ref.clone())
+                .collect(),
+        ]
+        .concat(),
         capability_refs: vec!["capability:source:content-index".to_string()],
         grant_refs: graph.writer_grant_refs.clone(),
         input_refs: snapshots

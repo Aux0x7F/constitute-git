@@ -55,6 +55,22 @@ fn fixture_is_protocol_validated_source_graph() {
         fixture.host_fabric_contribution.subject_ref,
         fixture.graph.head_snapshot_ref
     );
+    assert_eq!(
+        fixture.host_fabric_contribution.participant_ref,
+        fixture.graph.owner_ref
+    );
+    assert_eq!(
+        fixture.host_fabric_contribution.role_ref,
+        "role:sourceContentIndex"
+    );
+    assert!(fixture
+        .host_fabric_contribution
+        .module_refs
+        .contains(&"module:source-content-index".to_string()));
+    assert!(fixture
+        .host_fabric_contribution
+        .source_refs
+        .contains(&fixture.graph.head_snapshot_ref));
 }
 
 #[test]
