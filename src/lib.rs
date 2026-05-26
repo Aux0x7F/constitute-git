@@ -4,19 +4,24 @@ use constitute_fabric::{HostFabricMemberContributionSpec, build_host_fabric_memb
 use constitute_protocol::{
     FABRIC_MEMBER_CONTRIBUTION_BLOCKED, FABRIC_MEMBER_CONTRIBUTION_RUNNING,
     FABRIC_MEMBER_ROLE_SOURCE_CONTENT_INDEX, HostFabricMemberContribution,
-    RECORD_SOURCE_IMPORT_PROOF, RECORD_SOURCE_PROJECT_OPERATION, RECORD_SOURCE_REF_UPDATE,
-    RECORD_SOURCE_SNAPSHOT, RECORD_SOURCE_VERSION_GRAPH, RECORD_SOURCE_WRITER_GRANT,
+    RECORD_SOURCE_IMPORT_PROOF, RECORD_SOURCE_PROJECT_OPERATION, RECORD_SOURCE_REF_STORE_JOURNAL,
+    RECORD_SOURCE_REF_STORE_REPLAY_POSTURE, RECORD_SOURCE_REF_UPDATE, RECORD_SOURCE_SNAPSHOT,
+    RECORD_SOURCE_VERSION_GRAPH, RECORD_SOURCE_WRITER_GRANT, SOURCE_GRAPH_STATE_BLOCKED,
     SOURCE_GRAPH_STATE_READY, SOURCE_IMPORT_STATE_IMPORTED, SOURCE_OPERATION_FETCH,
     SOURCE_OPERATION_IMPORT, SOURCE_OPERATION_PROJECT_LINK, SOURCE_OPERATION_PUSH,
     SOURCE_OPERATION_REF_UPDATE, SOURCE_OPERATION_STATUS, SOURCE_PROJECT_COMPATIBILITY_SUPPORTED,
     SOURCE_PROJECT_OPERATION_STATE_APPLIED, SOURCE_PROJECT_OPERATION_STATE_BLOCKED,
     SOURCE_PROJECT_OPERATION_STATE_REJECTED, SOURCE_PROJECT_OPERATION_STATE_REQUESTED,
-    SOURCE_PROJECT_OPERATION_STATE_SUPERSEDED, SOURCE_REF_KIND_BRANCH, SOURCE_UPDATE_STATE_APPLIED,
-    SOURCE_UPDATE_STATE_BLOCKED, SOURCE_UPDATE_STATE_REJECTED, SOURCE_UPDATE_STATE_SUPERSEDED,
-    SourceGraphPolicy, SourceImportProof, SourceProjectOperation, SourceRefUpdate, SourceSnapshot,
-    SourceVersionGraph, SourceWriterGrant, StorageGraphEdge, sha256_hex, source_ref,
-    validate_host_fabric_member_contribution, validate_source_import_proof,
-    validate_source_project_operation, validate_source_ref_update, validate_source_snapshot,
+    SOURCE_PROJECT_OPERATION_STATE_SUPERSEDED, SOURCE_REF_KIND_BRANCH,
+    SOURCE_SIGNATURE_POSTURE_SIGNED, SOURCE_UPDATE_STATE_APPLIED, SOURCE_UPDATE_STATE_BLOCKED,
+    SOURCE_UPDATE_STATE_REJECTED, SOURCE_UPDATE_STATE_SUPERSEDED, SourceAppliedRefProjection,
+    SourceFileEntry, SourceGraphPolicy, SourceImportProof, SourceProjectOperation,
+    SourceRefStoreCurrentEntry, SourceRefStoreJournal, SourceRefStoreReplayPosture,
+    SourceRefUpdate, SourceSnapshot, SourceVersionGraph, SourceWriterGrant, StorageGraphEdge,
+    sha256_hex, source_ref, validate_host_fabric_member_contribution,
+    validate_source_applied_ref_projection, validate_source_import_proof,
+    validate_source_project_operation, validate_source_ref_store_journal,
+    validate_source_ref_store_replay_posture, validate_source_ref_update, validate_source_snapshot,
     validate_source_version_graph, validate_source_writer_grant, validate_storage_graph_edge,
 };
 use serde::{Deserialize, Serialize};
@@ -130,6 +135,20 @@ pub struct SourceProjectLinkOutcome {
     pub host_fabric_contribution: HostFabricMemberContribution,
 }
 
+#[derive(Clone, Debug)]
+pub struct SourceRefStoreJournalRequest {
+    pub source_graph_ref: String,
+    pub applied_projection: SourceAppliedRefProjection,
+    pub prior_transitions: Vec<SourceRefStoreCurrentEntry>,
+    pub source_ref_updates: Vec<SourceRefUpdate>,
+    pub storage_object_refs: Vec<String>,
+    pub storage_availability_refs: Vec<String>,
+    pub storage_pin_intent_refs: Vec<String>,
+    pub storage_pin_attestation_refs: Vec<String>,
+    pub evidence_refs: Vec<String>,
+    pub updated_at: Option<String>,
+}
+
 pub fn default_policy() -> SourceGraphPolicy {
     SourceGraphPolicy {
         fast_forward_only: true,
@@ -146,16 +165,34 @@ pub fn default_policy() -> SourceGraphPolicy {
 }
 
 pub fn build_source_graph_fixture(now: u64) -> Result<SourceGraphFixture> {
+    let parent_storage_object_ref = content_addressed_storage_ref("pack-parent");
+    let head_storage_object_ref = content_addressed_storage_ref("pack-head");
     let parent_snapshot = SourceSnapshot {
         kind: Some(RECORD_SOURCE_SNAPSHOT.to_string()),
         source_graph_ref: source_ref("graph", "constitute-git"),
         snapshot_ref: source_ref("snapshot", "parent"),
         commit_ref: "git:commit:0000001".to_string(),
         tree_ref: "git:tree:0000001".to_string(),
+        tree_hash_ref: hash_ref("git:tree:0000001"),
         parent_snapshot_refs: vec![],
-        storage_object_refs: vec!["storage:object:pack-parent".to_string()],
+        file_entries: source_snapshot_file_entries(
+            &source_ref("snapshot", "parent"),
+            "git:tree:0000001",
+            std::slice::from_ref(&parent_storage_object_ref),
+        ),
+        storage_object_refs: vec![parent_storage_object_ref.clone()],
         author_ref: "identity:root:aux".to_string(),
+        signature_posture: SOURCE_SIGNATURE_POSTURE_SIGNED.to_string(),
         message_digest_ref: "digest:sha256:parent-message".to_string(),
+        branch_refs: vec![source_ref("ref", "main")],
+        candidate_refs: vec![],
+        writer_grant_refs: vec![source_ref("grant", "writer-agent")],
+        authority_refs: vec!["authority:source:root".to_string()],
+        materialized_projection_refs: vec![format!(
+            "materialized:source-index:{}",
+            short_ref_id("source:snapshot:parent")
+        )],
+        dirty_projection_refs: vec![],
         signature_refs: vec!["signature:source:parent".to_string()],
         evidence_refs: vec!["source:evidence:parent-import".to_string()],
         issued_at: now.saturating_sub(10),
@@ -166,10 +203,26 @@ pub fn build_source_graph_fixture(now: u64) -> Result<SourceGraphFixture> {
         snapshot_ref: source_ref("snapshot", "head"),
         commit_ref: "git:commit:0000002".to_string(),
         tree_ref: "git:tree:0000002".to_string(),
+        tree_hash_ref: hash_ref("git:tree:0000002"),
         parent_snapshot_refs: vec![parent_snapshot.snapshot_ref.clone()],
-        storage_object_refs: vec!["storage:object:pack-head".to_string()],
+        file_entries: source_snapshot_file_entries(
+            &source_ref("snapshot", "head"),
+            "git:tree:0000002",
+            std::slice::from_ref(&head_storage_object_ref),
+        ),
+        storage_object_refs: vec![head_storage_object_ref.clone()],
         author_ref: "identity:device:agent".to_string(),
+        signature_posture: SOURCE_SIGNATURE_POSTURE_SIGNED.to_string(),
         message_digest_ref: "digest:sha256:head-message".to_string(),
+        branch_refs: vec![source_ref("ref", "main")],
+        candidate_refs: vec![],
+        writer_grant_refs: vec![source_ref("grant", "writer-agent")],
+        authority_refs: vec!["authority:source:root".to_string()],
+        materialized_projection_refs: vec![format!(
+            "materialized:source-index:{}",
+            short_ref_id("source:snapshot:head")
+        )],
+        dirty_projection_refs: vec![],
         signature_refs: vec!["signature:source:head".to_string()],
         evidence_refs: vec!["source:evidence:head-import".to_string()],
         issued_at: now,
@@ -230,10 +283,7 @@ pub fn build_source_graph_fixture(now: u64) -> Result<SourceGraphFixture> {
         input_ref: "git:pack:initial".to_string(),
         output_snapshot_ref: head_snapshot.snapshot_ref.clone(),
         state: SOURCE_IMPORT_STATE_IMPORTED.to_string(),
-        imported_object_refs: vec![
-            "storage:object:pack-parent".to_string(),
-            "storage:object:pack-head".to_string(),
-        ],
+        imported_object_refs: vec![parent_storage_object_ref, head_storage_object_ref],
         evidence_refs: vec!["source:evidence:pack-hash".to_string()],
         blocked_reasons: vec![],
         safe_facts: serde_json::json!({
@@ -366,12 +416,31 @@ pub fn import_snapshot(
         kind: Some(RECORD_SOURCE_SNAPSHOT.to_string()),
         source_graph_ref: state.graph.source_graph_ref.clone(),
         snapshot_ref: snapshot_ref.clone(),
-        commit_ref: request.commit_ref,
-        tree_ref: request.tree_ref,
+        commit_ref: request.commit_ref.clone(),
+        tree_ref: request.tree_ref.clone(),
+        tree_hash_ref: hash_ref(&request.tree_ref),
         parent_snapshot_refs: request.parent_snapshot_refs,
+        file_entries: source_snapshot_file_entries(
+            &snapshot_ref,
+            &request.tree_ref,
+            &request.storage_object_refs,
+        ),
         storage_object_refs: request.storage_object_refs.clone(),
         author_ref: request.author_ref,
+        signature_posture: SOURCE_SIGNATURE_POSTURE_SIGNED.to_string(),
         message_digest_ref: request.message_digest_ref,
+        branch_refs: state.graph.branch_refs.clone(),
+        candidate_refs: vec![],
+        writer_grant_refs: state.graph.writer_grant_refs.clone(),
+        authority_refs: vec![format!(
+            "authority:source:{}",
+            short_ref_id(&state.graph.source_graph_ref)
+        )],
+        materialized_projection_refs: vec![format!(
+            "materialized:source-index:{}",
+            short_ref_id(&snapshot_ref)
+        )],
+        dirty_projection_refs: vec![],
         signature_refs: request.signature_refs,
         evidence_refs: request.evidence_refs.clone(),
         issued_at: request.now,
@@ -530,6 +599,199 @@ pub fn link_project_work(
         source_project_operation: operation,
         host_fabric_contribution,
     })
+}
+
+pub fn source_ref_store_current_from_projection(
+    projection: &SourceAppliedRefProjection,
+) -> Result<SourceRefStoreCurrentEntry> {
+    validate_source_applied_ref_projection(projection)?;
+    Ok(SourceRefStoreCurrentEntry {
+        apply_ref: projection.apply_ref.clone(),
+        report_ref: projection.report_ref.clone(),
+        repo_ref: projection.repo_ref.clone(),
+        target_ref: projection.target_ref.clone(),
+        source_ref_update_refs: Vec::new(),
+        source_ref_transition_ref: projection.source_ref_transition_ref.clone(),
+        version_index_delta_ref: projection.version_index_delta_ref.clone(),
+        witness_ref: projection.witness_ref.clone(),
+        rollback_ref: projection.rollback_ref.clone(),
+        lifecycle_manifest_ref: projection.lifecycle_manifest_ref.clone(),
+        promotion_intent_ref: projection.promotion_intent_ref.clone(),
+        from_source_snapshot_ref: projection.from_source_snapshot_ref.clone(),
+        to_source_snapshot_ref: projection.to_source_snapshot_ref.clone(),
+        from_content_index_ref: projection.from_content_index_ref.clone(),
+        to_content_index_ref: projection.to_content_index_ref.clone(),
+        from_selected_version_ref: projection.from_selected_version_ref.clone(),
+        to_selected_version_ref: projection.to_selected_version_ref.clone(),
+        to_version_index_entry: projection.to_version_index_entry.clone(),
+        authority_refs: projection.authority_refs.clone(),
+        grant_refs: projection.grant_refs.clone(),
+        proof_gate_refs: projection.proof_gate_refs.clone(),
+        evidence_refs: projection.evidence_refs.clone(),
+        storage_refs: projection.storage_refs.clone(),
+        storage_pin_refs: projection.storage_pin_refs.clone(),
+        storage_availability_refs: projection.storage_availability_refs.clone(),
+        observed_at: projection.observed_at.clone(),
+    })
+}
+
+pub fn build_source_ref_store_journal(
+    request: SourceRefStoreJournalRequest,
+) -> Result<SourceRefStoreJournal> {
+    let source_ref_update_refs: Vec<String> = request
+        .source_ref_updates
+        .iter()
+        .map(|update| update.update_ref.clone())
+        .collect();
+    for update in &request.source_ref_updates {
+        validate_source_ref_update(update)?;
+    }
+    let mut current = source_ref_store_current_from_projection(&request.applied_projection)?;
+    current.source_ref_update_refs = source_ref_update_refs.clone();
+    let state = if request.applied_projection.state == SOURCE_UPDATE_STATE_APPLIED
+        && request.applied_projection.blocked_reasons.is_empty()
+    {
+        SOURCE_GRAPH_STATE_READY.to_string()
+    } else {
+        SOURCE_GRAPH_STATE_BLOCKED.to_string()
+    };
+    let mut transitions = request.prior_transitions;
+    if !transitions.iter().any(|entry| {
+        entry.target_ref == current.target_ref
+            && entry.source_ref_transition_ref == current.source_ref_transition_ref
+    }) {
+        transitions.push(current.clone());
+    }
+    let target_id = short_ref_id(&current.target_ref);
+    let journal_id = short_ref_id(&format!(
+        "{}|{}|{}",
+        current.target_ref,
+        current.source_ref_transition_ref,
+        transitions.len()
+    ));
+    let source_graph_ref = if request.source_graph_ref.trim().is_empty() {
+        format!("source:graph:source-ref-store:{target_id}")
+    } else {
+        request.source_graph_ref
+    };
+    let mut evidence_refs = request.evidence_refs;
+    for update_ref in &source_ref_update_refs {
+        if !evidence_refs.iter().any(|value| value == update_ref) {
+            evidence_refs.push(update_ref.clone());
+        }
+    }
+    for evidence_ref in &current.evidence_refs {
+        if !evidence_refs.iter().any(|value| value == evidence_ref) {
+            evidence_refs.push(evidence_ref.clone());
+        }
+    }
+    let storage_object_refs = if request.storage_object_refs.is_empty() {
+        current.storage_refs.clone()
+    } else {
+        request.storage_object_refs
+    };
+    let storage_availability_refs = if request.storage_availability_refs.is_empty() {
+        current.storage_availability_refs.clone()
+    } else {
+        request.storage_availability_refs
+    };
+    let blocked_reasons = if state == SOURCE_GRAPH_STATE_READY {
+        Vec::new()
+    } else {
+        request.applied_projection.blocked_reasons.clone()
+    };
+    let journal = SourceRefStoreJournal {
+        kind: Some(RECORD_SOURCE_REF_STORE_JOURNAL.to_string()),
+        state,
+        store_ref: format!("source-ref-store:native:{target_id}"),
+        journal_ref: format!("source-ref-journal:native:{target_id}:{journal_id}"),
+        source_graph_ref,
+        target_ref: current.target_ref.clone(),
+        repo_ref: current.repo_ref.clone(),
+        current,
+        transition_count: transitions.len() as u64,
+        transitions,
+        source_ref_updates: request.source_ref_updates,
+        source_ref_update_refs,
+        evidence_refs,
+        storage_object_refs,
+        storage_availability_refs,
+        storage_pin_intent_refs: request.storage_pin_intent_refs,
+        storage_pin_attestation_refs: request.storage_pin_attestation_refs,
+        blocked_reasons,
+        safe_facts: serde_json::json!({
+            "sourceRefStoreIsSourceVersionBoundary": true,
+            "sourceRefStoreAcceptsSourceRefUpdateEvents": true,
+            "operatorJsIsNotStoreOwner": true,
+            "storageObjectsAreByteAvailability": true,
+            "localPathIsNotStateSelector": true
+        }),
+        updated_at: request.updated_at,
+    };
+    validate_source_ref_store_journal(&journal)?;
+    Ok(journal)
+}
+
+pub fn replay_source_ref_store_journal(
+    journal: &SourceRefStoreJournal,
+    expected_target_ref: &str,
+    evidence_refs: Vec<String>,
+    observed_at: Option<String>,
+) -> Result<SourceRefStoreReplayPosture> {
+    validate_source_ref_store_journal(journal)?;
+    let target_matches = journal.target_ref == expected_target_ref;
+    let state = if journal.state == SOURCE_GRAPH_STATE_READY && target_matches {
+        SOURCE_GRAPH_STATE_READY.to_string()
+    } else {
+        SOURCE_GRAPH_STATE_BLOCKED.to_string()
+    };
+    let mut replay_evidence_refs = evidence_refs;
+    for evidence_ref in &journal.evidence_refs {
+        if !replay_evidence_refs
+            .iter()
+            .any(|value| value == evidence_ref)
+        {
+            replay_evidence_refs.push(evidence_ref.clone());
+        }
+    }
+    let blocked_reasons = if target_matches {
+        journal.blocked_reasons.clone()
+    } else {
+        vec!["source.refStore.targetMismatch".to_string()]
+    };
+    let replay = SourceRefStoreReplayPosture {
+        kind: Some(RECORD_SOURCE_REF_STORE_REPLAY_POSTURE.to_string()),
+        state,
+        replay_ref: format!(
+            "source-ref-store-replay:native:{}",
+            short_ref_id(&format!(
+                "{}|{}|{}",
+                journal.store_ref, expected_target_ref, journal.transition_count
+            ))
+        ),
+        store_ref: journal.store_ref.clone(),
+        journal_ref: journal.journal_ref.clone(),
+        target_ref: journal.target_ref.clone(),
+        expected_target_ref: expected_target_ref.to_string(),
+        repo_ref: journal.repo_ref.clone(),
+        current_transition_ref: journal.current.source_ref_transition_ref.clone(),
+        current_version_index_delta_ref: journal.current.version_index_delta_ref.clone(),
+        current_selected_version_ref: journal.current.to_selected_version_ref.clone(),
+        transition_count: journal.transition_count,
+        source_ref_update_refs: journal.source_ref_update_refs.clone(),
+        storage_object_refs: journal.storage_object_refs.clone(),
+        storage_availability_refs: journal.storage_availability_refs.clone(),
+        evidence_refs: replay_evidence_refs,
+        blocked_reasons,
+        safe_facts: serde_json::json!({
+            "sourceRefStoreReplayIsNativeReducer": true,
+            "operatorReportOrderingIsNotStateSelector": true,
+            "storageObjectsAreByteAvailability": true
+        }),
+        observed_at,
+    };
+    validate_source_ref_store_replay_posture(&replay)?;
+    Ok(replay)
 }
 
 fn source_project_operation_for_import(
@@ -1021,7 +1283,10 @@ pub fn source_content_index_contribution(
             "adapter:git:source-graph".to_string(),
         ],
         source_refs: [
-            vec![graph.source_graph_ref.clone(), graph.head_snapshot_ref.clone()],
+            vec![
+                graph.source_graph_ref.clone(),
+                graph.head_snapshot_ref.clone(),
+            ],
             graph.branch_refs.clone(),
             graph.tag_refs.clone(),
             snapshots
@@ -1118,6 +1383,39 @@ fn source_storage_graph_edges_for_snapshot(
 
 fn short_ref_id(value: &str) -> String {
     sha256_hex(value).chars().take(16).collect()
+}
+
+fn hash_ref(value: &str) -> String {
+    format!("sha256:{}", sha256_hex(value))
+}
+
+fn content_addressed_storage_ref(value: &str) -> String {
+    format!("storage:object:{}", sha256_hex(value))
+}
+
+fn source_snapshot_file_entries(
+    snapshot_ref: &str,
+    tree_ref: &str,
+    storage_object_refs: &[String],
+) -> Vec<SourceFileEntry> {
+    storage_object_refs
+        .iter()
+        .enumerate()
+        .map(|(index, storage_object_ref)| {
+            let entry_id = short_ref_id(&format!(
+                "{snapshot_ref}|{tree_ref}|{storage_object_ref}|{index}"
+            ));
+            SourceFileEntry {
+                file_ref: format!("source:file:constitute-git:{entry_id}"),
+                path_ref: format!("source:path:constitute-git:{entry_id}"),
+                virtual_path: format!("git-pack-{index}.bin"),
+                hash_ref: hash_ref(&format!("{tree_ref}|{storage_object_ref}")),
+                byte_length: storage_object_ref.len() as u64,
+                storage_object_ref: Some(storage_object_ref.clone()),
+                evidence_refs: vec![format!("source:evidence:file-hash:{entry_id}")],
+            }
+        })
+        .collect()
 }
 
 pub fn default_now() -> u64 {
