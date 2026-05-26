@@ -1,15 +1,19 @@
 use constitute_git::{
-    SourceImportRequest, SourceProjectLinkRequest, SourceRefUpdateOptions, SourceRefUpdateRequest,
-    build_ref_update, build_source_graph_fixture, build_status, default_now,
-    default_source_graph_state, import_snapshot, link_project_work, reduce_fixture_ref_update,
-    reduce_ref_update, source_graph_status, validate_source_graph_fixture,
-    validate_source_graph_state,
+    SourceImportRequest, SourceProjectLinkRequest, SourceRefStoreJournalRequest,
+    SourceRefUpdateOptions, SourceRefUpdateRequest, build_ref_update, build_source_graph_fixture,
+    build_source_ref_store_journal, build_status, default_now, default_source_graph_state,
+    import_snapshot, link_project_work, reduce_fixture_ref_update, reduce_ref_update,
+    replay_source_ref_store_journal, source_graph_status, source_ref_store_current_from_projection,
+    validate_source_graph_fixture, validate_source_graph_state,
 };
 use constitute_protocol::{
     FABRIC_MEMBER_CONTRIBUTION_RUNNING, FABRIC_MEMBER_ROLE_SOURCE_CONTENT_INDEX,
-    SOURCE_PROJECT_OPERATION_STATE_APPLIED, SOURCE_UPDATE_STATE_APPLIED,
-    SOURCE_UPDATE_STATE_BLOCKED, validate_host_fabric_member_contribution,
-    validate_source_project_operation, validate_source_ref_update,
+    RECORD_SOURCE_APPLIED_REF_PROJECTION, SOURCE_PROJECT_OPERATION_STATE_APPLIED,
+    SOURCE_UPDATE_STATE_APPLIED, SOURCE_UPDATE_STATE_BLOCKED, SourceAppliedRefProjection,
+    SourceRefUpdate, SourceVersionIndexDeltaEntry, sha256_hex,
+    validate_host_fabric_member_contribution, validate_source_project_operation,
+    validate_source_ref_store_journal, validate_source_ref_store_replay_posture,
+    validate_source_ref_update,
 };
 use std::{fs, process::Command};
 
@@ -23,6 +27,79 @@ fn default_request() -> SourceRefUpdateRequest {
         witness_refs: vec!["source:witness:runtime".to_string()],
         now: default_now(),
     }
+}
+
+fn storage_object_ref(value: &str) -> String {
+    format!("storage:object:{}", sha256_hex(value))
+}
+
+fn sample_applied_ref_projection() -> SourceAppliedRefProjection {
+    SourceAppliedRefProjection {
+        kind: Some(RECORD_SOURCE_APPLIED_REF_PROJECTION.to_string()),
+        state: SOURCE_UPDATE_STATE_APPLIED.to_string(),
+        projection_ref: "source-applied-ref-projection:native:test".to_string(),
+        report_ref: Some("operator-report:source-promotion-apply-test".to_string()),
+        apply_ref: Some("source-promotion-apply:test".to_string()),
+        repo_ref: "repo:constitute-cli".to_string(),
+        target_ref: "source:ref:native-dev:constitute-cli:main".to_string(),
+        lifecycle_manifest_ref: "lifecycle:manifest:native-dev:constitute-cli:test".to_string(),
+        promotion_intent_ref: "promotion:intent:source-candidate:constitute-cli:test".to_string(),
+        source_ref_transition_ref: "source-ref-transition:native-dev:constitute-cli:test"
+            .to_string(),
+        version_index_delta_ref: "version-index-delta:native-dev:constitute-cli:test".to_string(),
+        witness_ref: "witness:source-promotion-apply:constitute-cli:test".to_string(),
+        rollback_ref: "rollback:source-snapshot:constitute-cli:test".to_string(),
+        from_source_snapshot_ref: "source:snapshot:native-dev:constitute-cli:old".to_string(),
+        to_source_snapshot_ref: "source:snapshot:native-dev:constitute-cli:new".to_string(),
+        from_content_index_ref: "content-index:native-dev:constitute-cli:old".to_string(),
+        to_content_index_ref: "content-index:native-dev:constitute-cli:new".to_string(),
+        from_selected_version_ref: "version-selection:native-dev:constitute-cli:old".to_string(),
+        to_selected_version_ref: "version-selection:native-dev:constitute-cli:new".to_string(),
+        to_version_index_entry: SourceVersionIndexDeltaEntry {
+            entry_ref: Some("version-index-entry:native-dev:constitute-cli:new".to_string()),
+            contract_ref: Some("contract:constitute-cli".to_string()),
+            contract_version_ref: Some("contract-version:constitute-cli:0.1.0".to_string()),
+            selected_version_ref: Some(
+                "version-selection:native-dev:constitute-cli:new".to_string(),
+            ),
+            module_ref: Some("module:native-dev:constitute-cli".to_string()),
+            repo_ref: Some("repo:constitute-cli".to_string()),
+            declared_version: Some("0.1.0".to_string()),
+            source_snapshot_ref: Some("source:snapshot:native-dev:constitute-cli:new".to_string()),
+            content_index_ref: Some("content-index:native-dev:constitute-cli:new".to_string()),
+            tree_hash_ref: Some(
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_string(),
+            ),
+            artifact_ref: None,
+            selected_by_ref: Some("source:ref:native-dev:constitute-cli:main".to_string()),
+            authority_refs: vec!["authority:source-promotion:operator-dev".to_string()],
+            writer_grant_refs: vec!["grant:source-promotion:operator-dev".to_string()],
+        },
+        authority_refs: vec!["authority:source-promotion:operator-dev".to_string()],
+        grant_refs: vec!["grant:source-promotion:operator-dev".to_string()],
+        proof_gate_refs: vec!["proof-target:build:native-dev:constitute-cli".to_string()],
+        evidence_refs: vec!["proof-event:source-promotion:test".to_string()],
+        storage_refs: vec![storage_object_ref("source-ref-store")],
+        storage_pin_refs: vec!["storage:pin-intent:source-ref-store-test".to_string()],
+        storage_availability_refs: vec!["storage-availability:source-ref-store-test".to_string()],
+        blocked_reasons: vec![],
+        safe_facts: serde_json::json!({
+            "appliedProjectionIsNotDurableSourceStore": true
+        }),
+        observed_at: Some("2026-05-25T11:20:00Z".to_string()),
+    }
+}
+
+fn sample_source_ref_update() -> SourceRefUpdate {
+    build_ref_update(SourceRefUpdateOptions {
+        state: SOURCE_UPDATE_STATE_APPLIED.to_string(),
+        branch: "main".to_string(),
+        from_snapshot_ref: Some("source:snapshot:native-dev:constitute-cli:old".to_string()),
+        to_snapshot_ref: "source:snapshot:native-dev:constitute-cli:new".to_string(),
+        writer_ref: "identity:device:operator-dev".to_string(),
+        now: default_now() + 42,
+    })
 }
 
 #[test]
@@ -54,6 +131,26 @@ fn fixture_is_protocol_validated_source_graph() {
     assert_eq!(
         fixture.host_fabric_contribution.subject_ref,
         fixture.graph.head_snapshot_ref
+    );
+    assert_eq!(
+        fixture.host_fabric_contribution.participant_ref,
+        fixture.graph.owner_ref
+    );
+    assert_eq!(
+        fixture.host_fabric_contribution.role_ref,
+        "role:sourceContentIndex"
+    );
+    assert!(
+        fixture
+            .host_fabric_contribution
+            .module_refs
+            .contains(&"module:source-content-index".to_string())
+    );
+    assert!(
+        fixture
+            .host_fabric_contribution
+            .source_refs
+            .contains(&fixture.graph.head_snapshot_ref)
     );
 }
 
@@ -194,7 +291,7 @@ fn source_import_adds_snapshot_import_proof_and_storage_edges() {
             commit_ref: "git:commit:0000003".to_string(),
             tree_ref: "git:tree:0000003".to_string(),
             parent_snapshot_refs: vec![parent],
-            storage_object_refs: vec!["storage:object:pack-next".to_string()],
+            storage_object_refs: vec![storage_object_ref("pack-next")],
             author_ref: "identity:device:agent".to_string(),
             message_digest_ref: "digest:sha256:next-message".to_string(),
             signature_refs: vec!["signature:source:next".to_string()],
@@ -235,7 +332,7 @@ fn stateful_ref_apply_moves_head_only_when_applied() {
             commit_ref: "git:commit:0000003".to_string(),
             tree_ref: "git:tree:0000003".to_string(),
             parent_snapshot_refs: vec![old_head.clone()],
-            storage_object_refs: vec!["storage:object:pack-next".to_string()],
+            storage_object_refs: vec![storage_object_ref("pack-next")],
             author_ref: "identity:device:agent".to_string(),
             message_digest_ref: "digest:sha256:next-message".to_string(),
             signature_refs: vec!["signature:source:next".to_string()],
@@ -324,6 +421,209 @@ fn project_link_operation_records_adapter_posture_without_github_ownership() {
 }
 
 #[test]
+fn source_ref_store_journal_reduces_from_applied_projection() {
+    let projection = sample_applied_ref_projection();
+    let update = sample_source_ref_update();
+    let journal = build_source_ref_store_journal(SourceRefStoreJournalRequest {
+        source_graph_ref: "source:graph:source-ref-store:test".to_string(),
+        applied_projection: projection.clone(),
+        prior_transitions: vec![],
+        source_ref_updates: vec![update.clone()],
+        storage_object_refs: projection.storage_refs.clone(),
+        storage_availability_refs: projection.storage_availability_refs.clone(),
+        storage_pin_intent_refs: projection.storage_pin_refs.clone(),
+        storage_pin_attestation_refs: vec![
+            "storage:pin-attestation:source-ref-store-test".to_string(),
+        ],
+        evidence_refs: vec!["evidence:source-ref-store:rust-reducer".to_string()],
+        updated_at: Some("2026-05-25T11:20:01Z".to_string()),
+    })
+    .expect("journal reduces");
+
+    validate_source_ref_store_journal(&journal).expect("journal validates");
+    assert_eq!(journal.state, "ready");
+    assert_eq!(journal.current.target_ref, projection.target_ref);
+    assert_eq!(
+        journal.source_ref_update_refs,
+        vec![update.update_ref.clone()]
+    );
+    assert_eq!(
+        journal.current.source_ref_update_refs,
+        journal.source_ref_update_refs
+    );
+    assert_eq!(journal.source_ref_updates[0].update_ref, update.update_ref);
+    assert_eq!(journal.transition_count, 1);
+    assert_eq!(journal.storage_object_refs, projection.storage_refs);
+    assert_eq!(
+        journal.safe_facts["operatorJsIsNotStoreOwner"],
+        serde_json::Value::Bool(true)
+    );
+
+    let replay = replay_source_ref_store_journal(
+        &journal,
+        &journal.target_ref,
+        vec!["evidence:source-ref-store-replay:rust-reducer".to_string()],
+        Some("2026-05-25T11:20:02Z".to_string()),
+    )
+    .expect("replay reduces");
+    validate_source_ref_store_replay_posture(&replay).expect("replay validates");
+    assert_eq!(replay.state, "ready");
+    assert_eq!(
+        replay.current_transition_ref,
+        projection.source_ref_transition_ref
+    );
+    assert_eq!(
+        replay.source_ref_update_refs,
+        journal.source_ref_update_refs
+    );
+    assert_eq!(
+        replay.safe_facts["operatorReportOrderingIsNotStateSelector"],
+        serde_json::Value::Bool(true)
+    );
+}
+
+#[test]
+fn source_ref_store_replay_blocks_target_mismatch() {
+    let projection = sample_applied_ref_projection();
+    let journal = build_source_ref_store_journal(SourceRefStoreJournalRequest {
+        source_graph_ref: "source:graph:source-ref-store:test".to_string(),
+        applied_projection: projection,
+        prior_transitions: vec![],
+        source_ref_updates: vec![],
+        storage_object_refs: vec![],
+        storage_availability_refs: vec![],
+        storage_pin_intent_refs: vec![],
+        storage_pin_attestation_refs: vec![],
+        evidence_refs: vec![],
+        updated_at: None,
+    })
+    .expect("journal reduces");
+
+    let replay =
+        replay_source_ref_store_journal(&journal, "source:ref:native-dev:other:main", vec![], None)
+            .expect("mismatch still reduces to blocked posture");
+    validate_source_ref_store_replay_posture(&replay).expect("blocked replay validates");
+    assert_eq!(replay.state, "blocked");
+    assert_eq!(
+        replay.blocked_reasons,
+        vec!["source.refStore.targetMismatch"]
+    );
+}
+
+#[test]
+fn source_ref_store_current_entry_preserves_applied_projection_refs() {
+    let projection = sample_applied_ref_projection();
+    let current =
+        source_ref_store_current_from_projection(&projection).expect("current entry builds");
+    assert_eq!(current.target_ref, projection.target_ref);
+    assert_eq!(
+        current.to_source_snapshot_ref,
+        projection.to_source_snapshot_ref
+    );
+    assert_eq!(
+        current.to_version_index_entry,
+        projection.to_version_index_entry
+    );
+    assert_eq!(current.storage_refs, projection.storage_refs);
+}
+
+#[test]
+fn cli_emits_source_ref_store_journal_and_replay_posture() {
+    let mut applied_path = std::env::temp_dir();
+    applied_path.push(format!(
+        "constitute-git-applied-source-ref-{}.json",
+        std::process::id()
+    ));
+    let mut journal_path = std::env::temp_dir();
+    journal_path.push(format!(
+        "constitute-git-source-ref-store-{}.json",
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&applied_path);
+    let _ = fs::remove_file(&journal_path);
+    let mut update_path = std::env::temp_dir();
+    update_path.push(format!(
+        "constitute-git-source-ref-update-{}.json",
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&update_path);
+    fs::write(
+        &applied_path,
+        serde_json::to_string_pretty(&sample_applied_ref_projection()).expect("projection json"),
+    )
+    .expect("write applied projection");
+    fs::write(
+        &update_path,
+        serde_json::to_string_pretty(&sample_source_ref_update()).expect("source update json"),
+    )
+    .expect("write source update");
+
+    let bin = env!("CARGO_BIN_EXE_constitute-git");
+    let journal = Command::new(bin)
+        .args(["store", "journal", "--input"])
+        .arg(&applied_path)
+        .args(["--source-ref-update"])
+        .arg(&update_path)
+        .args([
+            "--source-graph",
+            "source:graph:source-ref-store:test",
+            "--storage-pin-attestation",
+            "storage:pin-attestation:source-ref-store-cli",
+        ])
+        .output()
+        .expect("store journal runs");
+    assert!(
+        journal.status.success(),
+        "{}",
+        String::from_utf8_lossy(&journal.stderr)
+    );
+    fs::write(&journal_path, &journal.stdout).expect("write journal");
+    let journal_json: serde_json::Value =
+        serde_json::from_slice(&journal.stdout).expect("journal json parses");
+    assert_eq!(journal_json["state"], "ready");
+    assert_eq!(
+        journal_json["sourceRefUpdates"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        journal_json["sourceRefUpdateRefs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        journal_json["safeFacts"]["operatorJsIsNotStoreOwner"],
+        serde_json::Value::Bool(true)
+    );
+
+    let replay = Command::new(bin)
+        .args(["store", "replay", "--input"])
+        .arg(&journal_path)
+        .args([
+            "--expected-target",
+            "source:ref:native-dev:constitute-cli:main",
+        ])
+        .output()
+        .expect("store replay runs");
+    assert!(
+        replay.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    let replay_json: serde_json::Value =
+        serde_json::from_slice(&replay.stdout).expect("replay json parses");
+    assert_eq!(replay_json["state"], "ready");
+    assert_eq!(
+        replay_json["safeFacts"]["sourceRefStoreReplayIsNativeReducer"],
+        serde_json::Value::Bool(true)
+    );
+    let _ = fs::remove_file(&applied_path);
+    let _ = fs::remove_file(&journal_path);
+    let _ = fs::remove_file(&update_path);
+}
+
+#[test]
 fn cli_persists_source_graph_state() {
     let mut path = std::env::temp_dir();
     path.push(format!("constitute-git-state-{}.json", std::process::id()));
@@ -348,7 +648,7 @@ fn cli_persists_source_graph_state() {
             "--clear-default-storage-object",
             "true",
             "--storage-object",
-            "storage:object:pack-cli",
+            &storage_object_ref("pack-cli"),
             "--clear-default-signature",
             "true",
             "--signature",

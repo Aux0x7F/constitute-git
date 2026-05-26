@@ -18,6 +18,8 @@ cargo run -- project link --state target/source-graph-state.json --project proje
 cargo run -- ref update --state applied --branch main --from source:snapshot:old --to source:snapshot:new
 cargo run -- ref reduce --branch main --from source:snapshot:parent --to source:snapshot:head
 cargo run -- ref apply --state target/source-graph-state.json --from source:snapshot:head --to source:snapshot:new
+cargo run -- store journal --input target/applied-source-ref.json --storage-object storage:object:store
+cargo run -- store replay --input target/source-ref-store.json --expected-target source:ref:native-dev:repo:main
 cargo run -- status --state target/source-graph-state.json
 ```
 
@@ -38,6 +40,10 @@ cargo run -- status --state target/source-graph-state.json
 - Source graph fixtures and imports emit a host-fabric source-content-index
   member contribution so fabric can reduce host composition posture without
   owning source truth, branch movement, or storage bytes.
+- Source-ref store journal/replay reduction lives at the source/version
+  boundary. It consumes protocol applied-ref projection records, emits protocol
+  source-ref-store journal/replay posture, and treats Storage refs as byte
+  availability rather than source-state ownership.
 - Build contracts and runners consume source refs; they do not become source
   truth.
 - Future Git compatibility should adapt Git pack/ref expectations to these
